@@ -17,9 +17,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Blofin API credentials (replace with your own)
-API_KEY = "YOUR_API_KEY"
-API_SECRET = "YOUR_API_SECRET"
-API_PASSPHRASE = "YOUR_API_PASSPHRASE"
+API_KEY = "50f02f2dc2d4442cb4de50b7f87d37f2"
+API_SECRET = "31ce8bbafc5c41a18620aacdbf427edf"
+API_PASSPHRASE = "zWz1sFh6O25173wnkTQ1"
 BASE_URL = "https://api.blofin.com"
 WS_URL = "wss://api.blofin.com/ws/v1/public"
 
