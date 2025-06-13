@@ -99,17 +99,23 @@ def cancel_order(order_id):
         return None
 
 def get_price():
-    """Get current market price via REST."""
+    """Get current market price via REST with retries."""
     path = f"/api/v1/market/ticker?instId={SYMBOL}"
-    headers = sign_request("GET", path)
-    try:
-        response = requests.get(f"{BASE_URL}{path}", headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        return float(data["data"][0]["last"])
-    except (requests.RequestException, KeyError) as e:
-        logger.error(f"Failed to get price: {e}")
-        return None
+    for attempt in range(3):
+        headers = sign_request("GET", path)
+        try:
+            response = requests.get(f"{BASE_URL}{path}", headers=headers, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            return float(data["data"][0]["last"])
+        except requests.RequestException as e:
+            logger.error(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                logger.error(f"Failed to get price after {attempt + 1} attempts: {e}")
+                return None
+    return None
 
 def calculate_rsi(prices):
     """Calculate RSI for the given price series."""
