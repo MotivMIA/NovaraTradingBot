@@ -46,13 +46,14 @@ def sign_request(method, path, body=None):
     """Generate HMAC-SHA256 signature for Blofin API."""
     timestamp = str(int(datetime.now().timestamp() * 1000))
     nonce = str(uuid.uuid4())
+    # For GET requests, only include path, method, timestamp, nonce
     msg = f"{path}{method}{timestamp}{nonce}"
-    if body:
-        msg += json.dumps(body)
+    if body and method in ["POST", "PUT"]:
+        msg += json.dumps(body, separators=(',', ':'))
     hex_signature = hmac.new(
         API_SECRET.encode(), msg.encode(), hashlib.sha256
-    ).hexdigest().encode()
-    signature = base64.b64encode(hex_signature).decode()
+    ).hexdigest()
+    signature = base64.b64encode(hex_signature.encode()).decode()
     return {
         "ACCESS-KEY": API_KEY,
         "ACCESS-SIGN": signature,
