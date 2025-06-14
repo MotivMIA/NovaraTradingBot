@@ -17,8 +17,8 @@ from uuid import uuid4
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S,%f"
+    format="%(asctime)s,%f - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
 
@@ -54,17 +54,14 @@ logger.debug(f"API_PASSPHRASE: {API_PASSPHRASE[:4]}...{API_PASSPHRASE[-4:]}")
 
 def sign_request(secret: str, method: str, path: str, body: dict | None = None) -> tuple[dict, str, str]:
     """Generate BloFin API request signature."""
-    # Get current time in PDT and convert to UTC
     local_time = datetime.now(LOCAL_TZ)
     utc_time = local_time.astimezone(pytz.UTC)
     timestamp_ms = int(utc_time.timestamp() * 1000)
-    # Validate timestamp against system time
     system_time_ms = int(time.time() * 1000)
     if abs(timestamp_ms - system_time_ms) > 30000:
         logger.warning(f"Timestamp offset too large: {timestamp_ms} ms vs system {system_time_ms} ms")
     timestamp = str(timestamp_ms)
-    nonce = str(int(time.time() * 1000))
-    # Use full path for signature as per documentation
+    nonce = str(uuid4())
     msg = f"{path}{method.upper()}{timestamp}{nonce}"
     if body:
         msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
@@ -118,25 +115,31 @@ async def sign_websocket_login(secret: str, api_key: str, passphrase: str) -> tu
 def get_instrument_info():
     """Get instrument details for SYMBOL."""
     path = "/api/v1/market/instruments"
-    try:
-        response = requests.get(f"{BASE_URL}{path}?instType=SWAP&instId={SYMBOL}", timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        logger.info(f"Instrument info response: {json.dumps(data, indent=2)}")
-        if data.get("code") == "0" and data.get("data"):
-            for inst in data["data"]:
-                if inst["instId"] == SYMBOL:
-                    return {
-                        "minSize": float(inst.get("minSize", 0.1)),
-                        "lotSize": float(inst.get("lotSize", 0.1)),
-                        "tickSize": float(inst.get("tickSize", 0.1)),
-                        "contractValue": float(inst.get("contractValue", 0.001))
-                    }
-        logger.error(f"No instrument info for {SYMBOL}")
-        return None
-    except requests.RequestException as e:
-        logger.error(f"Failed to get instrument info: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            response = requests.get(f"{BASE_URL}{path}?instType=SWAP&instId={SYMBOL}", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Instrument info response: {json.dumps(data, indent=2)}")
+            if data.get("code") == "0" and data.get("data"):
+                for inst in data["data"]:
+                    if inst["instId"] == SYMBOL:
+                        return {
+                            "minSize": float(inst.get("minSize", 0.1)),
+                            "lotSize": float(inst.get("lotSize", 0.1)),
+                            "tickSize": float(inst.get("tickSize", 0.1)),
+                            "contractValue": float(inst.get("contractValue", 0.001))
+                        }
+            logger.error(f"No instrument info for {SYMBOL}")
+            return None
+        except requests.RequestException as e:
+            logger.error(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            else:
+                logger.error(f"Failed to get instrument info after {attempt + 1} attempts: {e}")
+                return None
+    return None
 
 def get_price():
     """Get current market price via REST with retries."""
@@ -154,25 +157,26 @@ def get_price():
                 return None
         except requests.RequestException as e:
             logger.error(f"Attempt {attempt + 1} failed: {e}")
-            logger.error(f"Response: {response.text if 'response' in locals() else 'No response'}")
             if attempt < 2:
-                time.sleep(2 ** attempt)  # Exponential backoff
+                time.sleep(2 ** attempt)
             else:
                 logger.error(f"Failed to get price after {attempt + 1} attempts: {e}")
                 return None
     return None
 
-def place_order(price: float, size: float, side: str = "buy"):
-    """Place a limit order for SWAP contract."""
+def place_order(price: float, size: float, side: str = "buy", max_retries: int = 3):
+    """Place a limit order for SWAP contract with retries."""
     path = "/api/v1/trade/order"
     inst_info = get_instrument_info()
-    min_size = inst_info["minSize"] if inst_info else 0.1
-    lot_size = inst_info["lotSize"] if inst_info else 0.1
-    contract_value = inst_info["contractValue"] if inst_info else 0.001
+    if not inst_info:
+        logger.error("Failed to get instrument info, cannot place order")
+        return None
     
-    # Convert size from USD to contracts: (USD / price) / contractValue
+    min_size = inst_info["minSize"]
+    lot_size = inst_info["lotSize"]
+    contract_value = inst_info["contractValue"]
+    
     size = (size / price) / contract_value
-    # Round to lotSize
     size = max(round(size / lot_size) * lot_size, min_size)
     logger.info(f"Calculated order size: {size} contracts at ${price} (minSize: {min_size}, lotSize: {lot_size}, contractValue: {contract_value})")
     
@@ -187,62 +191,78 @@ def place_order(price: float, size: float, side: str = "buy"):
         "size": str(size)
     }
     
-    headers, _, _ = sign_request(API_SECRET, "POST", path, order_request)
-    try:
-        response = requests.post(f"{BASE_URL}{path}", headers=headers, json=order_request, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        logger.debug(f"Order response: {data}")
-        if data.get("code") == "0" and data.get("data"):
-            order_id = data["data"][0]["orderId"]
-            logger.info(f"Placed {side} order: {size} contracts at ${price}")
-            return order_id
-        else:
-            logger.error(f"Order placement failed: {data}")
-            return None
-    except requests.RequestException as e:
-        logger.error(f"Order placement error: {e}")
-        logger.error(f"Response: {response.text if 'response' in locals() else 'No response'}")
-        return None
+    for attempt in range(max_retries):
+        try:
+            headers, _, _ = sign_request(API_SECRET, "POST", path, order_request)
+            response = requests.post(f"{BASE_URL}{path}", headers=headers, json=order_request, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            logger.debug(f"Order response: {data}")
+            if data.get("code") == "0" and data.get("data"):
+                order_id = data["data"][0]["orderId"]
+                logger.info(f"Placed {side} order: {size} contracts at ${price}")
+                return order_id
+            else:
+                logger.error(f"Order placement failed: {data}")
+                if data.get("code") == "152406":
+                    logger.error("IP whitelisting issue detected, retrying...")
+                    time.sleep(2 ** attempt)
+                    continue
+                return None
+        except requests.RequestException as e:
+            logger.error(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                logger.error(f"Failed to place order after {max_retries} attempts: {e}")
+                return None
+    return None
 
-async def ws_connect():
-    """Connect to WebSocket and subscribe to tickers channel."""
-    try:
-        async with websockets.connect(WS_URL) as ws:
-            await ws.send(json.dumps({
-                "op": "subscribe",
-                "args": [{"channel": "tickers", "instId": SYMBOL}]
-            }))
-            logger.info(f"Subscribed to {SYMBOL} ticker")
-            last_order_time = 0
-            order_interval = 60  # Place orders every 60 seconds
-            last_price = None  # Initialize as None
-            price_change_threshold = 0.01  # 1% price change
-            
-            while True:
-                try:
-                    data = json.loads(await ws.recv())
-                    logger.info(f"WebSocket data: {json.dumps(data, indent=2)}")
-                    if "data" in data and data["data"]:
-                        price = float(data["data"][0]["last"])
-                        logger.info(f"WebSocket price: ${price}")
-                        # Place order only after initial bid, sufficient time, and significant price change
-                        current_time = time.time()
-                        if last_price is None:
-                            last_price = price  # Set initial price
-                            continue  # Skip first WebSocket update
-                        price_change = abs(price - last_price) / last_price
-                        if current_time - last_order_time >= order_interval and price_change >= price_change_threshold:
-                            await process_bid(price)
-                            last_order_time = current_time
-                            last_price = price
-                    time.sleep(0.1)  # Rate limit
-                except (websockets.exceptions.ConnectionClosed, json.JSONDecodeError) as e:
-                    logger.error(f"WebSocket error: {e}")
-                    break
-    except Exception as e:
-        logger.error(f"WebSocket connection failed: {e}")
-        logger.error(f"Handshake details: {e.__dict__ if hasattr(e, '__dict__') else str(e)}")
+async def ws_connect(max_retries: int = 3):
+    """Connect to WebSocket and subscribe to tickers channel with reconnection."""
+    retry_count = 0
+    while retry_count < max_retries:
+        try:
+            async with websockets.connect(WS_URL) as ws:
+                await ws.send(json.dumps({
+                    "op": "subscribe",
+                    "args": [{"channel": "tickers", "instId": SYMBOL}]
+                }))
+                logger.info(f"Subscribed to {SYMBOL} ticker")
+                last_order_time = 0
+                order_interval = 60
+                last_price = None
+                price_change_threshold = 0.01
+                
+                while True:
+                    try:
+                        data = json.loads(await ws.recv())
+                        logger.info(f"WebSocket data: {json.dumps(data, indent=2)}")
+                        if "data" in data and data["data"]:
+                            price = float(data["data"][0]["last"])
+                            logger.info(f"WebSocket price: ${price}")
+                            current_time = time.time()
+                            if last_price is None:
+                                last_price = price
+                                continue
+                            price_change = abs(price - last_price) / last_price
+                            if current_time - last_order_time >= order_interval and price_change >= price_change_threshold:
+                                await process_bid(price)
+                                last_order_time = current_time
+                                last_price = price
+                        await asyncio.sleep(0.1)
+                    except (websockets.exceptions.ConnectionClosed, json.JSONDecodeError) as e:
+                        logger.error(f"WebSocket error: {e}")
+                        break
+        except Exception as e:
+            logger.error(f"WebSocket connection failed: {e}")
+            retry_count += 1
+            if retry_count < max_retries:
+                logger.info(f"Retrying WebSocket connection (attempt {retry_count + 1}/{max_retries})")
+                await asyncio.sleep(2 ** retry_count)
+            else:
+                logger.error(f"Failed to connect to WebSocket after {max_retries} attempts")
+                break
 
 async def process_bid(price: float):
     """Process phi-based bidding strategy."""
@@ -261,10 +281,7 @@ async def main():
         return
     
     logger.info(f"Current price: ${price}")
-    # Place initial bid
     await process_bid(price)
-    
-    # Start WebSocket for real-time updates
     await ws_connect()
 
 if __name__ == "__main__":
