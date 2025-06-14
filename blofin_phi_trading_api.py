@@ -48,6 +48,10 @@ if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
     logger.error("Missing API credentials in .env")
     exit(1)
 
+# Log credentials (redacted for security)
+logger.debug(f"API_KEY: {API_KEY[:4]}...{API_KEY[-4:]}")
+logger.debug(f"API_PASSPHRASE: {API_PASSPHRASE[:4]}...{API_PASSPHRASE[-4:]}")
+
 def sign_request(secret: str, method: str, path: str, body: dict | None = None) -> tuple[dict, str, str]:
     """Generate BloFin API request signature."""
     # Get current time in PDT and convert to UTC
@@ -60,7 +64,7 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
         logger.warning(f"Timestamp offset too large: {timestamp_ms} ms vs system {system_time_ms} ms")
     timestamp = str(timestamp_ms)
     nonce = str(uuid4())
-    # Use full path for signature
+    # Use full path for signature as per documentation
     msg = f"{path}{method.upper()}{timestamp}{nonce}"
     if body:
         msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
