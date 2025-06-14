@@ -1,3 +1,4 @@
+
 import asyncio
 import base64
 import hmac
@@ -14,7 +15,7 @@ from uuid import uuid4
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Enable DEBUG for signature troubleshooting
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S,%f"
 )
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Environment toggle: True for demo, False for live
-DEMO_MODE = os.getenv("DEMO_MODE", "False").lower() == "true"
+DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
 
 # API configuration
 BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
@@ -45,11 +46,11 @@ if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
 
 def sign_request(secret: str, method: str, path: str, body: dict | None = None) -> tuple[dict, str, str]:
     """Generate BloFin API request signature."""
-    timestamp = str(int(datetime.now().timestamp() * 1000))
+    timestamp = str(int(datetime.utcnow().timestamp() * 1000))  # Use UTC for consistency
     nonce = str(uuid4())
     msg = f"{path}{method}{timestamp}{nonce}"
     if body:
-        msg += json.dumps(body, separators=(',', ':'))
+        msg += json.dumps(body, separators=(',', ':'), sort_keys=True)  # Sort keys for consistency
     
     # Ensure secret is stripped of whitespace
     secret = secret.strip()
@@ -74,6 +75,7 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
         "ACCESS-PASSPHRASE": API_PASSPHRASE.strip(),
         "Content-Type": "application/json"
     }
+    logger.debug(f"Request headers: {headers}")
     return headers, timestamp, nonce
 
 async def sign_websocket_login(secret: str, api_key: str, passphrase: str) -> tuple[str, str, str]:
@@ -90,7 +92,9 @@ async def sign_websocket_login(secret: str, api_key: str, passphrase: str) -> tu
         msg.encode('utf-8'),
         hashlib.sha256
     ).digest()
-    return base64.b64encode(signature).decode('utf-8').strip(), timestamp, nonce
+    signature = base64.b64encode(signature).decode('utf-8').strip()
+    logger.debug(f"WebSocket signature: {signature}")
+    return signature, timestamp, nonce
 
 def get_instrument_info():
     """Get instrument details for SYMBOL."""
@@ -166,7 +170,6 @@ def place_order(price: float, size: float, side: str = "buy"):
     }
     
     headers, _, _ = sign_request(API_SECRET, "POST", path, order_request)
-    logger.debug(f"Request headers: {headers}")
     try:
         response = requests.post(f"{BASE_URL}{path}", headers=headers, json=order_request, timeout=5)
         response.raise_for_status()
