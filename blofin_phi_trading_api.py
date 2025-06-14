@@ -60,9 +60,12 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
         logger.warning(f"Timestamp offset too large: {timestamp_ms} ms vs system {system_time_ms} ms")
     timestamp = str(timestamp_ms)
     nonce = str(uuid4())
-    msg = f"{path}{method.upper()}{timestamp}{nonce}"
+    # Try lowercase method and simplified path
+    msg = f"{path}{method.lower()}{timestamp}{nonce}"
     if body:
-        msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
+        # Exclude optional fields like leverage
+        sign_body = {k: v for k, v in body.items() if k not in ["leverage"]}
+        msg += json.dumps(sign_body, separators=(',', ':'), sort_keys=True)
     
     secret = secret.strip()
     logger.debug(f"Local time (PDT): {local_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
