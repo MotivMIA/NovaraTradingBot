@@ -109,15 +109,13 @@ class TradingBot:
         if abs(timestamp_ms - system_time_ms) > 30000:
             logger.warning(f"Timestamp offset: {timestamp_ms} ms vs system {system_time_ms} ms")
         timestamp = str(timestamp_ms)
-        nonce = str(uuid4())  # Use UUID per api.py
+        nonce = str(uuid4())
         
-        # Build path with query parameters for GET
         path_with_params = path
         if params:
             query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
             path_with_params += f"?{query}"
         
-        # Build signature content
         body_str = json.dumps(body, separators=(',', ':'), sort_keys=True) if body else ""
         content = path_with_params + method.upper() + timestamp + nonce + body_str
         
@@ -126,7 +124,6 @@ class TradingBot:
         logger.debug(f"Timestamp (ms): {timestamp_ms}")
         logger.debug(f"Signature message: {content}")
         
-        # Generate signature per api.py
         sign_token = hmac.new(
             API_SECRET.encode(),
             content.encode(),
@@ -256,12 +253,14 @@ class TradingBot:
                 response.raise_for_status()
                 data = response.json()
                 logger.debug(f"Balance response: {data}")
-                if data.get("code") == "0" and data.get("data"):
-                    for asset in data["data"]:
-                        if asset["currency"] == "USDT":
-                            balance = float(asset["total"])
+                if data.get("code") == "0" and data.get("data") and "details" in data["data"]:
+                    for asset in data["data"]["details"]:
+                        if isinstance(asset, dict) and asset.get("currency") == "USDT":
+                            balance = float(asset.get("balance", 0))
                             logger.info(f"Account balance: ${balance:.2f} USDT")
                             return balance
+                    logger.error("No USDT balance found in response")
+                    return None
                 logger.error(f"Unexpected balance response: {data}")
                 if data.get("code") == "152409":
                     logger.error("Signature verification failed, possible credential mismatch")
@@ -287,7 +286,6 @@ class TradingBot:
         previous = candles[-2]
         patterns = {}
         
-        # Bullish/Bearish Engulfing
         current_body = abs(current["close"] - current["open"])
         previous_body = abs(previous["close"] - previous["open"])
         if current_body > previous_body:
@@ -298,7 +296,6 @@ class TradingBot:
                 if current["open"] >= previous["close"] and current["close"] <= previous["open"]:
                     patterns["bearish_engulfing"] = True
         
-        # Pin Bar
         body = abs(current["close"] - current["open"])
         upper_wick = current["high"] - max(current["open"], current["close"])
         lower_wick = min(current["open"], current["close"]) - current["low"]
@@ -309,7 +306,6 @@ class TradingBot:
             elif lower_wick > 2 * body:
                 patterns["bullish_pin"] = True
         
-        # Doji
         if body / total_range < 0.05:
             patterns["doji"] = True
         
@@ -457,14 +453,12 @@ class TradingBot:
         confidence = 0.0
         signal = None
         
-        # Volatility check
         if len(self.price_history[symbol]) >= 2:
             price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
             if price_change < VOLATILITY_THRESHOLD:
                 logger.debug(f"Low volatility for {symbol}: {price_change:.4f}")
                 return None
         
-        # Price action signals
         if patterns:
             if patterns.get("bullish_engulfing") or patterns.get("bullish_pin"):
                 signal = "buy"
@@ -480,7 +474,6 @@ class TradingBot:
                     signal = "sell"
                     confidence += 0.2
         
-        # VWAP-based signals
         if vwap is not None:
             if price > vwap and len(self.candle_history[symbol]) >= MIN_PRICE_POINTS:
                 if signal == "buy":
@@ -508,7 +501,6 @@ class TradingBot:
                         signal = "sell"
                         confidence += 0.3
         
-        # Additional indicators
         if len(self.candle_history[symbol]) >= RSI_PERIOD:
             if macd is not None and macd_signal is not None and ema_fast is not None and ema_slow is not None:
                 if macd > macd_signal and ema_fast > ema_slow:
