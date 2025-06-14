@@ -1,3 +1,4 @@
+
 import asyncio
 import base64
 import hmac
@@ -49,21 +50,29 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
     nonce = str(uuid4())
     msg = f"{path}{method}{timestamp}{nonce}"
     if body:
-        msg += json.dumps(body)
+        msg += json.dumps(body, separators=(',', ':'))
     
-    hex_signature = hmac.new(
-        secret.encode(),
-        msg.encode(),
+    # Ensure secret is stripped of whitespace
+    secret = secret.strip()
+    logger.debug(f"Signature message: {msg}")
+    
+    # Generate HMAC-SHA256 signature
+    signature = hmac.new(
+        secret.encode('utf-8'),
+        msg.encode('utf-8'),
         hashlib.sha256
-    ).hexdigest().encode()
-    signature = base64.b64encode(hex_signature).decode()
+    ).digest()
+    
+    # Base64 encode the signature
+    signature = base64.b64encode(signature).decode('utf-8').strip()
+    logger.debug(f"Generated signature: {signature}")
     
     headers = {
-        "ACCESS-KEY": API_KEY,
+        "ACCESS-KEY": API_KEY.strip(),
         "ACCESS-SIGN": signature,
         "ACCESS-TIMESTAMP": timestamp,
         "ACCESS-NONCE": nonce,
-        "ACCESS-PASSPHRASE": API_PASSPHRASE,
+        "ACCESS-PASSPHRASE": API_PASSPHRASE.strip(),
         "Content-Type": "application/json"
     }
     return headers, timestamp, nonce
@@ -76,12 +85,13 @@ async def sign_websocket_login(secret: str, api_key: str, passphrase: str) -> tu
     path = "/users/self/verify"
     msg = f"{path}{method}{timestamp}{nonce}"
     
-    hex_signature = hmac.new(
-        secret.encode(),
-        msg.encode(),
+    secret = secret.strip()
+    signature = hmac.new(
+        secret.encode('utf-8'),
+        msg.encode('utf-8'),
         hashlib.sha256
-    ).hexdigest().encode()
-    return base64.b64encode(hex_signature).decode(), timestamp, nonce
+    ).digest()
+    return base64.b64encode(signature).decode('utf-8').strip(), timestamp, nonce
 
 def get_instrument_info():
     """Get instrument details for SYMBOL."""
@@ -157,6 +167,7 @@ def place_order(price: float, size: float, side: str = "buy"):
     }
     
     headers, _, _ = sign_request(API_SECRET, "POST", path, order_request)
+    logger.debug(f"Request headers: {headers}")
     try:
         response = requests.post(f"{BASE_URL}{path}", headers=headers, json=order_request, timeout=5)
         response.raise_for_status()
@@ -184,7 +195,7 @@ async def ws_connect():
             logger.info(f"Subscribed to {SYMBOL} ticker")
             last_order_time = 0
             order_interval = 60  # Place orders every 60 seconds
-            last_price = 0
+            last_price = None  # Initialize as None
             price_change_threshold = 0.01  # 1% price change
             
             while True:
@@ -194,9 +205,12 @@ async def ws_connect():
                     if "data" in data and data["data"]:
                         price = float(data["data"][0]["last"])
                         logger.info(f"WebSocket price: ${price}")
-                        # Place order if time elapsed and price changed significantly
+                        # Place order only after initial bid, sufficient time, and significant price change
                         current_time = time.time()
-                        price_change = abs(price - last_price) / last_price if last_price else 1
+                        if last_price is None:
+                            last_price = price  # Set initial price
+                            continue  # Skip first WebSocket update
+                        price_change = abs(price - last_price) / last_price
                         if current_time - last_order_time >= order_interval and price_change >= price_change_threshold:
                             await process_bid(price)
                             last_order_time = current_time
