@@ -11,6 +11,7 @@ import websockets
 import pandas as pd
 import numpy as np
 import socket
+import sqlite3
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
@@ -77,6 +78,7 @@ VWAP_PERIOD = 20  # VWAP calculation period
 VOLATILITY_THRESHOLD = 0.02  # Min price change for volatile pairs
 CANDLE_TIMEFRAME = "1m"  # 1-minute candles
 CANDLE_FETCH_INTERVAL = 60  # Fetch candles every 60 seconds
+CANDLE_LIMIT = 1000  # Fetch up to 1000 candles at startup
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -105,6 +107,25 @@ class TradingBot:
         self.scaler = StandardScaler()
         self.is_model_trained = {symbol: False for symbol in SYMBOLS}
         self.last_model_train = {symbol: 0 for symbol in SYMBOLS}
+
+    def save_candles(self, symbol: str):
+        """Save candle history to SQLite."""
+        conn = sqlite3.connect('market_data.db')
+        df = pd.DataFrame(self.candle_history[symbol])
+        if not df.empty:
+            df.to_sql(f"{symbol}_candles", conn, if_exists='replace', index=False)
+        conn.close()
+
+    def load_candles(self, symbol: str):
+        """Load candle history from SQLite."""
+        conn = sqlite3.connect('market_data.db')
+        try:
+            df = pd.read_sql(f"SELECT * FROM {symbol}_candles", conn)
+            self.candle_history[symbol] = df.to_dict('records')
+            logger.info(f"Loaded {len(self.candle_history[symbol])} candles for {symbol} from database")
+        except:
+            logger.debug(f"No stored candles found for {symbol}")
+        conn.close()
 
     def sign_request(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> tuple[dict, str, str]:
         """Generate BloFin API request signature per api.py."""
@@ -166,7 +187,7 @@ class TradingBot:
             logger.error(f"Credential validation error: {e}")
             return False
 
-    def get_candles(self, symbol: str, limit: int = 100) -> list | None:
+    def get_candles(self, symbol: str, limit: int = CANDLE_LIMIT) -> list | None:
         """Fetch candlestick data with rate limit mitigation."""
         current_time = time.time()
         if current_time - self.last_candle_fetch[symbol] < CANDLE_FETCH_INTERVAL:
@@ -181,7 +202,7 @@ class TradingBot:
                 logger.debug(f"Candle response for {symbol}: {json.dumps(data, indent=2)}")
                 if data.get("code") == "0" and data.get("data"):
                     self.last_candle_fetch[symbol] = current_time
-                    return [{
+                    candles = [{
                         "timestamp": int(candle[0]),
                         "open": float(candle[1]),
                         "high": float(candle[2]),
@@ -189,6 +210,7 @@ class TradingBot:
                         "close": float(candle[4]),
                         "volume": float(candle[5])
                     } for candle in data["data"]]
+                    return candles
                 logger.error(f"No candle data for {symbol}")
                 return None
             except requests.RequestException as e:
@@ -296,7 +318,6 @@ class TradingBot:
         previous = candles[-2]
         patterns = {}
         
-        # Bullish/Bearish Engulfing
         current_body = abs(current["close"] - current["open"])
         previous_body = abs(previous["close"] - previous["open"])
         if current_body > previous_body:
@@ -307,7 +328,6 @@ class TradingBot:
                 if current["open"] >= previous["close"] and current["close"] <= previous["open"]:
                     patterns["bearish_engulfing"] = True
         
-        # Pin Bar
         body = abs(current["close"] - current["open"])
         upper_wick = current["high"] - max(current["open"], current["close"])
         lower_wick = min(current["open"], current["close"]) - current["low"]
@@ -318,11 +338,9 @@ class TradingBot:
             elif lower_wick > 2 * body:
                 patterns["bullish_pin"] = True
         
-        # Doji
         if body / total_range < 0.05:
             patterns["doji"] = True
         
-        # Head-and-Shoulders (Bearish)
         prices = [c["high"] for c in candles[-7:]]
         if prices[2] < prices[3] > prices[4] and prices[0] < prices[3] and prices[5] < prices[3]:
             patterns["head_and_shoulders"] = True
@@ -452,8 +470,8 @@ class TradingBot:
 
     def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float] | None:
         """Generate VWAP and price action-driven trading signal."""
-        if len(self.price_history[symbol]) < MIN_PRICE_POINTS:
-            logger.warning(f"Skipping signal for {symbol}: insufficient price data")
+        if len(self.price_history[symbol]) < MIN_PRICE_POINTS or len(self.candle_history[symbol]) < MIN_PRICE_POINTS:
+            logger.warning(f"Skipping signal for {symbol}: insufficient data")
             return None
         
         indicators = self.calculate_indicators(symbol)
@@ -631,9 +649,11 @@ class TradingBot:
                             "args": [{"channel": "tickers", "instId": symbol}]
                         }))
                         logger.info(f"Subscribed to {symbol} ticker")
+                        self.load_candles(symbol)
                         candles = self.get_candles(symbol)
                         if candles:
                             self.candle_history[symbol] = candles
+                            self.save_candles(symbol)
                             logger.info(f"Fetched {len(candles)} initial candles for {symbol}")
                     
                     last_order_time = {symbol: 0 for symbol in SYMBOLS}
@@ -661,6 +681,7 @@ class TradingBot:
                                     self.candle_history[symbol].append(candles[0])
                                     if len(self.candle_history[symbol]) > 100:
                                         self.candle_history[symbol] = self.candle_history[symbol][-100:]
+                                    self.save_candles(symbol)
                                 
                                 current_time = time.time()
                                 if last_price[symbol] is None:
@@ -704,7 +725,6 @@ class TradingBot:
             logger.error(f"Max drawdown reached for {symbol}: {self.account_balance:.2f}/{self.initial_balance:.2f}")
             return
         
-        # Dynamic risk based on volatility
         risk_factor = min(2, max(0.5, price_change / VOLATILITY_THRESHOLD))
         risk_amount = self.account_balance * RISK_PER_TRADE * risk_factor
         logger.debug(f"Dynamic risk for {symbol}: {risk_factor:.2f}x, amount: ${risk_amount:.2f}")
@@ -735,9 +755,11 @@ class TradingBot:
             logger.info(f"Current price for {symbol}: ${price}")
             self.price_history[symbol].append(price)
             self.volume_history[symbol].append(volume)
+            self.load_candles(symbol)
             candles = self.get_candles(symbol)
             if candles:
                 self.candle_history[symbol] = candles
+                self.save_candles(symbol)
                 logger.info(f"Fetched {len(candles)} initial candles for {symbol}")
             signal_info = self.generate_signal(symbol, price)
             if signal_info:
