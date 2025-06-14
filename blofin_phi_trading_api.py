@@ -1,4 +1,4 @@
-
+# BloFin Trading API with Phi-based Bidding Strategy
 import asyncio
 import base64
 import hmac
@@ -9,13 +9,13 @@ import os
 import time
 import requests
 import websockets
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from uuid import uuid4
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,  # Enable DEBUG for signature troubleshooting
+    level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S,%f"
 )
@@ -46,24 +46,23 @@ if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
 
 def sign_request(secret: str, method: str, path: str, body: dict | None = None) -> tuple[dict, str, str]:
     """Generate BloFin API request signature."""
-    timestamp = str(int(datetime.utcnow().timestamp() * 1000))  # Use UTC for consistency
+    timestamp = str(int(datetime.now(timezone.UTC).timestamp() * 1000))
     nonce = str(uuid4())
-    msg = f"{path}{method}{timestamp}{nonce}"
+    # Try path without /api/v1 prefix
+    sign_path = path.replace("/api/v1", "", 1) if path.startswith("/api/v1") else path
+    msg = f"{sign_path}{method}{timestamp}{nonce}"
     if body:
-        msg += json.dumps(body, separators=(',', ':'), sort_keys=True)  # Sort keys for consistency
+        msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
     
-    # Ensure secret is stripped of whitespace
     secret = secret.strip()
     logger.debug(f"Signature message: {msg}")
     
-    # Generate HMAC-SHA256 signature
     signature = hmac.new(
         secret.encode('utf-8'),
         msg.encode('utf-8'),
         hashlib.sha256
     ).digest()
     
-    # Base64 encode the signature
     signature = base64.b64encode(signature).decode('utf-8').strip()
     logger.debug(f"Generated signature: {signature}")
     
@@ -174,6 +173,7 @@ def place_order(price: float, size: float, side: str = "buy"):
         response = requests.post(f"{BASE_URL}{path}", headers=headers, json=order_request, timeout=5)
         response.raise_for_status()
         data = response.json()
+        logger.debug(f"Order response: {data}")
         if data.get("code") == "0" and data.get("data"):
             order_id = data["data"][0]["orderId"]
             logger.info(f"Placed {side} order: {size} contracts at ${price}")
