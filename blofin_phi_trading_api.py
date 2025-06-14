@@ -9,7 +9,8 @@ import os
 import time
 import requests
 import websockets
-from datetime import datetime, timezone
+from datetime import datetime
+import pytz
 from dotenv import load_dotenv
 from uuid import uuid4
 
@@ -35,6 +36,9 @@ INITIAL_BID_USD = 100.0  # Initial bid amount in USD
 PHI = 1.618  # Golden ratio for bid progression
 SIZE_PRECISION = 8  # Decimal places for size
 
+# Timezone configuration
+LOCAL_TZ = pytz.timezone("America/Los_Angeles")  # PDT
+
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
 API_SECRET = os.getenv("DEMO_API_SECRET" if DEMO_MODE else "API_SECRET")
@@ -46,10 +50,13 @@ if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
 
 def sign_request(secret: str, method: str, path: str, body: dict | None = None) -> tuple[dict, str, str]:
     """Generate BloFin API request signature."""
-    timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    # Ensure timestamp is not too far in future/past (BloFin tolerance ~30s)
+    # Get current time in PDT and convert to UTC
+    local_time = datetime.now(LOCAL_TZ)
+    utc_time = local_time.astimezone(pytz.UTC)
+    timestamp_ms = int(utc_time.timestamp() * 1000)
+    # Validate timestamp against system time
     if abs(timestamp_ms - int(time.time() * 1000)) > 30000:
-        logger.warning(f"Timestamp offset too large: {timestamp_ms}")
+        logger.warning(f"Timestamp offset too large: {timestamp_ms} ms")
     timestamp = str(timestamp_ms)
     nonce = str(uuid4())
     msg = f"{path}{method.upper()}{timestamp}{nonce}"
@@ -57,6 +64,8 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
         msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
     
     secret = secret.strip()
+    logger.debug(f"Local time (PDT): {local_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
+    logger.debug(f"UTC time: {utc_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
     logger.debug(f"Signature message: {msg}")
     
     signature = hmac.new(
@@ -81,7 +90,9 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
 
 async def sign_websocket_login(secret: str, api_key: str, passphrase: str) -> tuple[str, str, str]:
     """Generate WebSocket login signature."""
-    timestamp = str(int(time.time() * 1000))
+    local_time = datetime.now(LOCAL_TZ)
+    utc_time = local_time.astimezone(pytz.UTC)
+    timestamp = str(int(utc_time.timestamp() * 1000))
     nonce = timestamp
     method = "GET"
     path = "/users/self/verify"
