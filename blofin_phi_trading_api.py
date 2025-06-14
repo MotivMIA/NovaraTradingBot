@@ -103,7 +103,7 @@ class TradingBot:
         if abs(timestamp_ms - system_time_ms) > 30000:
             logger.warning(f"Timestamp offset: {timestamp_ms} ms vs system {system_time_ms} ms")
         timestamp = str(timestamp_ms)
-        nonce = str(int(time.time() * 1000))  # Timestamp-based nonce
+        nonce = str(uuid4())
         msg = f"{path}{method.upper()}{timestamp}{nonce}"
         if body:
             msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
