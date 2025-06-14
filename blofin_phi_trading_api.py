@@ -79,6 +79,7 @@ VOLATILITY_THRESHOLD = 0.02  # Min price change for volatile pairs
 CANDLE_TIMEFRAME = "1m"  # 1-minute candles
 CANDLE_FETCH_INTERVAL = 60  # Fetch candles every 60 seconds
 CANDLE_LIMIT = 1000  # Fetch up to 1000 candles at startup
+DB_PATH = "market_data.db"  # Database path
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -109,23 +110,33 @@ class TradingBot:
         self.last_model_train = {symbol: 0 for symbol in SYMBOLS}
 
     def save_candles(self, symbol: str):
-        """Save candle history to SQLite."""
-        conn = sqlite3.connect('market_data.db')
-        df = pd.DataFrame(self.candle_history[symbol])
-        if not df.empty:
-            df.to_sql(f"{symbol}_candles", conn, if_exists='replace', index=False)
-        conn.close()
+        """Save candle history to SQLite with error handling."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            df = pd.DataFrame(self.candle_history[symbol])
+            if not df.empty:
+                df.to_sql(f"{symbol}_candles", conn, if_exists='replace', index=False)
+                logger.debug(f"Saved {len(df)} candles for {symbol} to {DB_PATH}")
+            else:
+                logger.warning(f"No candles to save for {symbol}")
+            conn.close()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to save candles for {symbol}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error saving candles for {symbol}: {e}")
 
     def load_candles(self, symbol: str):
-        """Load candle history from SQLite."""
-        conn = sqlite3.connect('market_data.db')
+        """Load candle history from SQLite with error handling."""
         try:
+            conn = sqlite3.connect(DB_PATH)
             df = pd.read_sql(f"SELECT * FROM {symbol}_candles", conn)
             self.candle_history[symbol] = df.to_dict('records')
-            logger.info(f"Loaded {len(self.candle_history[symbol])} candles for {symbol} from database")
-        except:
-            logger.debug(f"No stored candles found for {symbol}")
-        conn.close()
+            logger.info(f"Loaded {len(self.candle_history[symbol])} candles for {symbol} from {DB_PATH}")
+            conn.close()
+        except sqlite3.Error as e:
+            logger.debug(f"No stored candles found for {symbol} or database error: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error loading candles for {symbol}: {e}")
 
     def sign_request(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> tuple[dict, str, str]:
         """Generate BloFin API request signature per api.py."""
@@ -296,6 +307,10 @@ class TradingBot:
                 logger.error(f"Unexpected balance response: {data}")
                 if data.get("code") == "152409":
                     logger.error("Signature verification failed, possible credential mismatch")
+                if data.get("code") == "152401":
+                    logger.error("Access key does not exist, verify API key")
+                if data.get("code") == "152406":
+                    logger.error("IP whitelisting issue, verify IP settings")
                 time.sleep(2 ** attempt)
             except requests.RequestException as e:
                 logger.error(f"Attempt {attempt + 1} failed: {e}")
@@ -471,7 +486,7 @@ class TradingBot:
     def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float] | None:
         """Generate VWAP and price action-driven trading signal."""
         if len(self.price_history[symbol]) < MIN_PRICE_POINTS or len(self.candle_history[symbol]) < MIN_PRICE_POINTS:
-            logger.warning(f"Skipping signal for {symbol}: insufficient data")
+            logger.warning(f"Skipping signal for {symbol}: insufficient data (price: {len(self.price_history[symbol])}, candles: {len(self.candle_history[symbol])})")
             return None
         
         indicators = self.calculate_indicators(symbol)
