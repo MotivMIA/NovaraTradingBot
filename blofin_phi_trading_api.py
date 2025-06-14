@@ -63,7 +63,7 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
     if abs(timestamp_ms - system_time_ms) > 30000:
         logger.warning(f"Timestamp offset too large: {timestamp_ms} ms vs system {system_time_ms} ms")
     timestamp = str(timestamp_ms)
-    nonce = str(uuid4())
+    nonce = str(int(time.time() * 1000))
     # Use full path for signature as per documentation
     msg = f"{path}{method.upper()}{timestamp}{nonce}"
     if body:
