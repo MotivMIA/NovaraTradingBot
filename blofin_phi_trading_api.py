@@ -1,4 +1,3 @@
-# BloFin Trading API with Phi-based Bidding Strategy
 import asyncio
 import base64
 import hmac
@@ -46,11 +45,9 @@ if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
 
 def sign_request(secret: str, method: str, path: str, body: dict | None = None) -> tuple[dict, str, str]:
     """Generate BloFin API request signature."""
-    timestamp = str(int(datetime.now(timezone.UTC).timestamp() * 1000))
+    timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
     nonce = str(uuid4())
-    # Try path without /api/v1 prefix
-    sign_path = path.replace("/api/v1", "", 1) if path.startswith("/api/v1") else path
-    msg = f"{sign_path}{method}{timestamp}{nonce}"
+    msg = f"{path}{method}{timestamp}{nonce}"  # Use full path (e.g., /api/v1/trade/order)
     if body:
         msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
     
