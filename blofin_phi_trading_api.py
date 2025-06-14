@@ -184,8 +184,7 @@ def place_order(price: float, size: float, side: str = "buy"):
         "side": side,
         "orderType": "limit",
         "price": str(round(price, 2)),
-        "size": str(size),
-        "leverage": "3"
+        "size": str(size)
     }
     
     headers, _, _ = sign_request(API_SECRET, "POST", path, order_request)
