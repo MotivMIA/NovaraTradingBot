@@ -5,3 +5,5 @@ websocket-client
 numpy
 ta
 pytz>=2025.2
+pandas
+scikit-learn
