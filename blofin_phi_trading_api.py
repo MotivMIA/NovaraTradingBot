@@ -68,6 +68,7 @@ BB_STD = 2
 ML_LOOKBACK = 50
 MAX_DRAWDOWN = 0.10  # 10% max drawdown
 DEFAULT_BALANCE = 10000.0  # Fallback balance if API fails
+MIN_PRICE_POINTS = 5  # Minimum data for initial signals
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -103,7 +104,7 @@ class TradingBot:
         if abs(timestamp_ms - system_time_ms) > 30000:
             logger.warning(f"Timestamp offset: {timestamp_ms} ms vs system {system_time_ms} ms")
         timestamp = str(timestamp_ms)
-        nonce = str(uuid4())
+        nonce = str(int(time.time() * 1000))  # Timestamp-based nonce
         msg = f"{path}{method.upper()}{timestamp}{nonce}"
         if body:
             msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
@@ -133,6 +134,22 @@ class TradingBot:
         }
         logger.debug(f"Request headers: {headers}")
         return headers, timestamp, nonce
+
+    def validate_credentials(self) -> bool:
+        """Validate API credentials with a test request."""
+        path = "/api/v1/market/time"  # Public endpoint for server time
+        try:
+            response = requests.get(f"{BASE_URL}{path}", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == "0":
+                logger.info("Public API request successful, credentials likely valid")
+                return True
+            logger.error(f"Credential validation failed: {data}")
+            return False
+        except requests.RequestException as e:
+            logger.error(f"Credential validation error: {e}")
+            return False
 
     def get_instrument_info(self, symbol: str) -> dict | None:
         """Get instrument details."""
@@ -186,10 +203,10 @@ class TradingBot:
         return None
 
     def get_account_balance(self) -> float | None:
-        """Get account balance in USDT."""
+        """Get account balance in USDT with retry."""
         path = "/api/v1/account/balance"
-        headers, _, _ = self.sign_request("GET", path)
-        for attempt in range(3):
+        for attempt in range(5):  # Increased retries
+            headers, _, _ = self.sign_request("GET", path)
             try:
                 response = requests.get(f"{BASE_URL}{path}", headers=headers, timeout=5)
                 response.raise_for_status()
@@ -204,13 +221,13 @@ class TradingBot:
                 logger.error(f"Unexpected balance response: {data}")
                 if data.get("code") == "152409":
                     logger.error("Signature verification failed, possible credential mismatch")
-                return None
+                time.sleep(2 ** attempt)  # Exponential backoff
             except requests.RequestException as e:
                 logger.error(f"Attempt {attempt + 1} failed: {e}")
-                if attempt < 2:
+                if attempt < 4:
                     time.sleep(2 ** attempt)
                 else:
-                    logger.error(f"Failed after {attempt + 1} attempts: {e}")
+                    logger.error(f"Failed after 5 attempts: {e}")
                     return None
         logger.warning(f"Using default balance: ${DEFAULT_BALANCE:.2f} USDT")
         return DEFAULT_BALANCE
@@ -259,26 +276,28 @@ class TradingBot:
     def calculate_indicators(self, symbol: str) -> dict | None:
         """Calculate technical indicators."""
         prices = self.price_history.get(symbol, [])
-        if len(prices) < max(RSI_PERIOD, MACD_SLOW + MACD_SIGNAL, EMA_SLOW, BB_PERIOD):
+        if len(prices) < MIN_PRICE_POINTS:
             logger.warning(f"Insufficient price data for {symbol}: {len(prices)} points")
-            return None
+            return {"price": prices[-1] if prices else None}
         
         df = pd.DataFrame(prices, columns=["price"])
-        indicators = {}
-        indicators["rsi"] = RSIIndicator(df["price"], window=RSI_PERIOD).rsi().iloc[-1]
-        macd = MACD(df["price"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
-        indicators["macd"] = macd.macd().iloc[-1]
-        indicators["macd_signal"] = macd.macd_signal().iloc[-1]
-        indicators["ema_fast"] = EMAIndicator(df["price"], window=EMA_FAST).ema_indicator().iloc[-1]
-        indicators["ema_slow"] = EMAIndicator(df["price"], window=EMA_SLOW).ema_indicator().iloc[-1]
-        bb = BollingerBands(df["price"], window=BB_PERIOD, window_dev=BB_STD)
-        indicators["bb_upper"] = bb.bollinger_hband().iloc[-1]
-        indicators["bb_lower"] = bb.bollinger_lband().iloc[-1]
-        indicators["price"] = df["price"].iloc[-1]
+        indicators = {"price": df["price"].iloc[-1]}
+        
+        if len(prices) >= RSI_PERIOD:
+            indicators["rsi"] = RSIIndicator(df["price"], window=RSI_PERIOD).rsi().iloc[-1]
+        if len(prices) >= max(MACD_SLOW + MACD_SIGNAL, EMA_SLOW, BB_PERIOD):
+            macd = MACD(df["price"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
+            indicators["macd"] = macd.macd().iloc[-1]
+            indicators["macd_signal"] = macd.macd_signal().iloc[-1]
+            indicators["ema_fast"] = EMAIndicator(df["price"], window=EMA_FAST).ema_indicator().iloc[-1]
+            indicators["ema_slow"] = EMAIndicator(df["price"], window=EMA_SLOW).ema_indicator().iloc[-1]
+            bb = BollingerBands(df["price"], window=BB_PERIOD, window_dev=BB_STD)
+            indicators["bb_upper"] = bb.bollinger_hband().iloc[-1]
+            indicators["bb_lower"] = bb.bollinger_lband().iloc[-1]
         indicators["price_lag1"] = df["price"].iloc[-2] if len(df) > 1 else np.nan
         indicators["price_lag2"] = df["price"].iloc[-3] if len(df) > 2 else np.nan
         
-        logger.debug(f"{symbol} indicators - RSI: {indicators['rsi']:.2f}, MACD: {indicators['macd']:.2f}, Signal: {indicators['macd_signal']:.2f}")
+        logger.debug(f"{symbol} indicators - RSI: {indicators.get('rsi', 'N/A')}, MACD: {indicators.get('macd', 'N/A')}")
         return indicators
 
     def predict_ml_signal(self, symbol: str, indicators: dict) -> str | None:
@@ -289,15 +308,15 @@ class TradingBot:
                 return None
         
         features = [
-            indicators["rsi"],
-            indicators["macd"],
-            indicators["macd_signal"],
-            indicators["ema_fast"],
-            indicators["ema_slow"],
-            indicators["bb_upper"],
-            indicators["bb_lower"],
-            indicators["price_lag1"],
-            indicators["price_lag2"]
+            indicators.get("rsi", 50.0),
+            indicators.get("macd", 0.0),
+            indicators.get("macd_signal", 0.0),
+            indicators.get("ema_fast", indicators["price"]),
+            indicators.get("ema_slow", indicators["price"]),
+            indicators.get("bb_upper", indicators["price"] * 1.02),
+            indicators.get("bb_lower", indicators["price"] * 0.98),
+            indicators.get("price_lag1", indicators["price"]),
+            indicators.get("price_lag2", indicators["price"])
         ]
         
         if any(np.isnan(f) for f in features):
@@ -317,46 +336,53 @@ class TradingBot:
     def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float] | None:
         """Generate hybrid trading signal."""
         indicators = self.calculate_indicators(symbol)
-        if not indicators:
+        if not indicators or not indicators["price"]:
             return None
         
-        rsi = indicators["rsi"]
-        macd = indicators["macd"]
-        macd_signal = indicators["macd_signal"]
-        ema_fast = indicators["ema_fast"]
-        ema_slow = indicators["ema_slow"]
-        bb_upper = indicators["bb_upper"]
-        bb_lower = indicators["bb_lower"]
+        rsi = indicators.get("rsi")
+        macd = indicators.get("macd")
+        macd_signal = indicators.get("macd_signal")
+        ema_fast = indicators.get("ema_fast")
+        ema_slow = indicators.get("ema_slow")
+        bb_upper = indicators.get("bb_upper")
+        bb_lower = indicators.get("bb_lower")
         price = indicators["price"]
         
         ml_signal = self.predict_ml_signal(symbol, indicators)
         confidence = 0.0
+        signal = None
         
-        # Trend-following signals
-        if macd > macd_signal and ema_fast > ema_slow:
-            signal = "buy"
-            confidence += 0.4
-        elif macd < macd_signal and ema_fast < ema_slow:
-            signal = "sell"
-            confidence += 0.4
-        else:
-            signal = None
-        
-        # Mean-reversion signals
-        if rsi < RSI_OVERSOLD and price <= bb_lower:
-            signal = "buy"
-            confidence += 0.3
-        elif rsi > RSI_OVERBOUGHT and price >= bb_upper:
-            signal = "sell"
-            confidence += 0.3
-        
-        # ML signal
-        if ml_signal:
-            if signal and signal == ml_signal:
-                confidence += 0.3
-            elif not signal:
+        # Simplified initial signal with minimal data
+        if len(self.price_history[symbol]) < RSI_PERIOD:
+            if ml_signal:
                 signal = ml_signal
-                confidence += 0.3
+                confidence = 0.5
+        else:
+            # Trend-following signals
+            if macd is not None and macd_signal is not None and ema_fast is not None and ema_slow is not None:
+                if macd > macd_signal and ema_fast > ema_slow:
+                    signal = "buy"
+                    confidence += 0.4
+                elif macd < macd_signal and ema_fast < ema_slow:
+                    signal = "sell"
+                    confidence += 0.4
+            
+            # Mean-reversion signals
+            if rsi is not None and bb_upper is not None and bb_lower is not None:
+                if rsi < RSI_OVERSOLD and price <= bb_lower:
+                    signal = "buy"
+                    confidence += 0.3
+                elif rsi > RSI_OVERBOUGHT and price >= bb_upper:
+                    signal = "sell"
+                    confidence += 0.3
+            
+            # ML signal
+            if ml_signal:
+                if signal and signal == ml_signal:
+                    confidence += 0.3
+                elif not signal:
+                    signal = ml_signal
+                    confidence += 0.3
         
         if not signal or confidence < 0.5:
             return None
@@ -499,6 +525,10 @@ class TradingBot:
 
     async def main(self):
         """Main trading loop."""
+        if not self.validate_credentials():
+            logger.error("Credential validation failed, exiting")
+            return
+        
         self.account_balance = self.get_account_balance()
         if not self.account_balance:
             logger.error("Failed to get initial account balance, using default")
