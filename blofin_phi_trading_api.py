@@ -1,4 +1,3 @@
-
 import asyncio
 import base64
 import hmac
@@ -52,7 +51,7 @@ load_dotenv()
 DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
 BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
 WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public" if DEMO_MODE else "wss://openapi.blofin.com/ws/public"
-SYMBOLS = os.getenv("SYMBOLS", "BTC-USDT,ETH-USDT").split(",")
+SYMBOLS = os.getenv("SYMBOLS", "BTC-USDT,ETH-USDT,XRP-USDT").split(",")
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.01))  # 1% risk
 SIZE_PRECISION = 8
 RSI_PERIOD = 14
@@ -67,8 +66,11 @@ BB_PERIOD = 20
 BB_STD = 2
 ML_LOOKBACK = 50
 MAX_DRAWDOWN = 0.10  # 10% max drawdown
-DEFAULT_BALANCE = 10000.0  # Fallback balance if API fails
+DEFAULT_BALANCE = 10000.0  # Fallback balance
 MIN_PRICE_POINTS = 5  # Minimum data for initial signals
+VWAP_PERIOD = 20  # VWAP calculation period
+VOLATILITY_THRESHOLD = 0.02  # Min price change for volatile pairs
+CANDLE_TIMEFRAME = "1m"  # 1-minute candles for price action
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -87,7 +89,9 @@ LOCAL_TZ = pytz.timezone("America/Los_Angeles")
 
 class TradingBot:
     def __init__(self):
-        self.price_history = {symbol: [] for symbol in SYMBOLS}
+        self.candle_history = {symbol: [] for symbol in SYMBOLS}  # OHLC candles
+        self.price_history = {symbol: [] for symbol in SYMBOLS}  # Last prices
+        self.volume_history = {symbol: [] for symbol in SYMBOLS}
         self.account_balance = None
         self.initial_balance = None
         self.ml_model = LogisticRegression()
@@ -104,7 +108,7 @@ class TradingBot:
         if abs(timestamp_ms - system_time_ms) > 30000:
             logger.warning(f"Timestamp offset: {timestamp_ms} ms vs system {system_time_ms} ms")
         timestamp = str(timestamp_ms)
-        nonce = str(int(time.time() * 1000))  # Timestamp-based nonce
+        nonce = str(int(time.time() * 1000))
         msg = f"{path}{method.upper()}{timestamp}{nonce}"
         if body:
             msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
@@ -137,9 +141,9 @@ class TradingBot:
 
     def validate_credentials(self) -> bool:
         """Validate API credentials with a test request."""
-        path = "/api/v1/market/time"  # Public endpoint for server time
+        path = "/api/v1/market/tickers"
         try:
-            response = requests.get(f"{BASE_URL}{path}", timeout=5)
+            response = requests.get(f"{BASE_URL}{path}?instId={SYMBOLS[0]}", timeout=5)
             response.raise_for_status()
             data = response.json()
             if data.get("code") == "0":
@@ -150,6 +154,37 @@ class TradingBot:
         except requests.RequestException as e:
             logger.error(f"Credential validation error: {e}")
             return False
+
+    def get_candles(self, symbol: str, limit: int = 100) -> list | None:
+        """Fetch candlestick data for price action analysis."""
+        path = "/api/v1/market/candles"
+        params = {"instId": symbol, "bar": CANDLE_TIMEFRAME, "limit": str(limit)}
+        for attempt in range(3):
+            try:
+                response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
+                response.raise_for_status()
+                data = response.json()
+                logger.debug(f"Candle response for {symbol}: {json.dumps(data, indent=2)}")
+                if data.get("code") == "0" and data.get("data"):
+                    # Data format: [ts, open, high, low, close, volume]
+                    return [{
+                        "timestamp": int(candle[0]),
+                        "open": float(candle[1]),
+                        "high": float(candle[2]),
+                        "low": float(candle[3]),
+                        "close": float(candle[4]),
+                        "volume": float(candle[5])
+                    } for candle in data["data"]]
+                logger.error(f"No candle data for {symbol}")
+                return None
+            except requests.RequestException as e:
+                logger.error(f"Attempt {attempt + 1} failed: {e}")
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Failed after {attempt + 1} attempts: {e}")
+                    return None
+        return None
 
     def get_instrument_info(self, symbol: str) -> dict | None:
         """Get instrument details."""
@@ -180,8 +215,8 @@ class TradingBot:
                     return None
         return None
 
-    def get_price(self, symbol: str) -> float | None:
-        """Get current market price."""
+    def get_price(self, symbol: str) -> tuple[float, float] | None:
+        """Get current market price and volume."""
         path = "/api/v1/market/tickers"
         for attempt in range(3):
             try:
@@ -190,7 +225,7 @@ class TradingBot:
                 data = response.json()
                 logger.info(f"Ticker response for {symbol}: {json.dumps(data, indent=2)}")
                 if data.get("code") == "0" and data.get("data") and "last" in data["data"][0]:
-                    return float(data["data"][0]["last"])
+                    return float(data["data"][0]["last"]), float(data["data"][0]["lastSize"])
                 logger.error(f"Unexpected response: {data}")
                 return None
             except requests.RequestException as e:
@@ -205,7 +240,7 @@ class TradingBot:
     def get_account_balance(self) -> float | None:
         """Get account balance in USDT with retry."""
         path = "/api/v1/account/balance"
-        for attempt in range(5):  # Increased retries
+        for attempt in range(5):
             headers, _, _ = self.sign_request("GET", path)
             try:
                 response = requests.get(f"{BASE_URL}{path}", headers=headers, timeout=5)
@@ -221,7 +256,7 @@ class TradingBot:
                 logger.error(f"Unexpected balance response: {data}")
                 if data.get("code") == "152409":
                     logger.error("Signature verification failed, possible credential mismatch")
-                time.sleep(2 ** attempt)  # Exponential backoff
+                time.sleep(2 ** attempt)
             except requests.RequestException as e:
                 logger.error(f"Attempt {attempt + 1} failed: {e}")
                 if attempt < 4:
@@ -232,10 +267,66 @@ class TradingBot:
         logger.warning(f"Using default balance: ${DEFAULT_BALANCE:.2f} USDT")
         return DEFAULT_BALANCE
 
+    def detect_price_action_patterns(self, symbol: str) -> dict | None:
+        """Detect candlestick patterns for price action."""
+        candles = self.candle_history.get(symbol, [])
+        if len(candles) < 2:
+            logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} candles")
+            return None
+        
+        current = candles[-1]
+        previous = candles[-2]
+        patterns = {}
+        
+        # Bullish/Bearish Engulfing
+        current_body = abs(current["close"] - current["open"])
+        previous_body = abs(previous["close"] - previous["open"])
+        if current_body > previous_body:
+            if current["close"] > current["open"] and previous["close"] < previous["open"]:
+                if current["open"] <= previous["close"] and current["close"] >= previous["open"]:
+                    patterns["bullish_engulfing"] = True
+            elif current["close"] < current["open"] and previous["close"] > previous["open"]:
+                if current["open"] >= previous["close"] and current["close"] <= previous["open"]:
+                    patterns["bearish_engulfing"] = True
+        
+        # Pin Bar
+        body = abs(current["close"] - current["open"])
+        upper_wick = current["high"] - max(current["open"], current["close"])
+        lower_wick = min(current["open"], current["close"]) - current["low"]
+        total_range = current["high"] - current["low"]
+        if body / total_range < 0.3:
+            if upper_wick > 2 * body:
+                patterns["bearish_pin"] = True
+            elif lower_wick > 2 * body:
+                patterns["bullish_pin"] = True
+        
+        # Doji
+        if body / total_range < 0.05:
+            patterns["doji"] = True
+        
+        if patterns:
+            logger.debug(f"Price action patterns for {symbol}: {patterns}")
+            return patterns
+        return None
+
+    def calculate_vwap(self, symbol: str) -> float | None:
+        """Calculate VWAP for the last VWAP_PERIOD candles."""
+        candles = self.candle_history.get(symbol, [])
+        if len(candles) < VWAP_PERIOD:
+            logger.warning(f"Insufficient candle data for VWAP calculation for {symbol}: {len(candles)} candles")
+            return None
+        
+        df = pd.DataFrame(candles[-VWAP_PERIOD:])
+        df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
+        df["pv"] = df["typical_price"] * df["volume"]
+        vwap = df["pv"].sum() / df["volume"].sum()
+        logger.debug(f"VWAP for {symbol}: ${vwap:.2f}")
+        return vwap
+
     def train_ml_model(self, symbol: str):
         """Train logistic regression model for a symbol."""
         current_time = time.time()
-        if current_time - self.last_model_train[symbol] < 3600:  # Train every hour
+        if current_time - self.last_model_train[symbol] < 3600:
             return
         
         prices = self.price_history.get(symbol, [])
@@ -274,30 +365,33 @@ class TradingBot:
         logger.info(f"ML model trained for {symbol} with {len(df)} data points")
 
     def calculate_indicators(self, symbol: str) -> dict | None:
-        """Calculate technical indicators."""
-        prices = self.price_history.get(symbol, [])
-        if len(prices) < MIN_PRICE_POINTS:
-            logger.warning(f"Insufficient price data for {symbol}: {len(prices)} points")
-            return {"price": prices[-1] if prices else None}
+        """Calculate technical indicators including VWAP."""
+        candles = self.candle_history.get(symbol, [])
+        if len(candles) < MIN_PRICE_POINTS:
+            logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} candles")
+            return {"price": candles[-1]["close"] if candles else None}
         
-        df = pd.DataFrame(prices, columns=["price"])
-        indicators = {"price": df["price"].iloc[-1]}
+        df = pd.DataFrame(candles)
+        indicators = {"price": df["close"].iloc[-1]}
+        vwap = self.calculate_vwap(symbol)
+        if vwap:
+            indicators["vwap"] = vwap
         
-        if len(prices) >= RSI_PERIOD:
-            indicators["rsi"] = RSIIndicator(df["price"], window=RSI_PERIOD).rsi().iloc[-1]
-        if len(prices) >= max(MACD_SLOW + MACD_SIGNAL, EMA_SLOW, BB_PERIOD):
-            macd = MACD(df["price"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
+        if len(candles) >= RSI_PERIOD:
+            indicators["rsi"] = RSIIndicator(df["close"], window=RSI_PERIOD).rsi().iloc[-1]
+        if len(candles) >= max(MACD_SLOW + MACD_SIGNAL, EMA_SLOW, BB_PERIOD):
+            macd = MACD(df["close"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
             indicators["macd"] = macd.macd().iloc[-1]
             indicators["macd_signal"] = macd.macd_signal().iloc[-1]
-            indicators["ema_fast"] = EMAIndicator(df["price"], window=EMA_FAST).ema_indicator().iloc[-1]
-            indicators["ema_slow"] = EMAIndicator(df["price"], window=EMA_SLOW).ema_indicator().iloc[-1]
-            bb = BollingerBands(df["price"], window=BB_PERIOD, window_dev=BB_STD)
+            indicators["ema_fast"] = EMAIndicator(df["close"], window=EMA_FAST).ema_indicator().iloc[-1]
+            indicators["ema_slow"] = EMAIndicator(df["close"], window=EMA_SLOW).ema_indicator().iloc[-1]
+            bb = BollingerBands(df["close"], window=BB_PERIOD, window_dev=BB_STD)
             indicators["bb_upper"] = bb.bollinger_hband().iloc[-1]
             indicators["bb_lower"] = bb.bollinger_lband().iloc[-1]
-        indicators["price_lag1"] = df["price"].iloc[-2] if len(df) > 1 else np.nan
-        indicators["price_lag2"] = df["price"].iloc[-3] if len(df) > 2 else np.nan
+        indicators["price_lag1"] = df["close"].iloc[-2] if len(df) > 1 else np.nan
+        indicators["price_lag2"] = df["close"].iloc[-3] if len(df) > 2 else np.nan
         
-        logger.debug(f"{symbol} indicators - RSI: {indicators.get('rsi', 'N/A')}, MACD: {indicators.get('macd', 'N/A')}")
+        logger.debug(f"{symbol} indicators - VWAP: {indicators.get('vwap', 'N/A')}, RSI: {indicators.get('rsi', 'N/A')}")
         return indicators
 
     def predict_ml_signal(self, symbol: str, indicators: dict) -> str | None:
@@ -334,11 +428,13 @@ class TradingBot:
         return "buy" if prediction[1] > prediction[0] else "sell"
 
     def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float] | None:
-        """Generate hybrid trading signal."""
+        """Generate VWAP and price action-driven trading signal."""
         indicators = self.calculate_indicators(symbol)
+        patterns = self.detect_price_action_patterns(symbol)
         if not indicators or not indicators["price"]:
             return None
         
+        vwap = indicators.get("vwap")
         rsi = indicators.get("rsi")
         macd = indicators.get("macd")
         macd_signal = indicators.get("macd_signal")
@@ -352,37 +448,93 @@ class TradingBot:
         confidence = 0.0
         signal = None
         
-        # Simplified initial signal with minimal data
-        if len(self.price_history[symbol]) < RSI_PERIOD:
-            if ml_signal:
-                signal = ml_signal
-                confidence = 0.5
-        else:
-            # Trend-following signals
+        # Volatility check
+        if len(self.price_history[symbol]) >= 2:
+            price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
+            if price_change < VOLATILITY_THRESHOLD:
+                logger.debug(f"Low volatility for {symbol}: {price_change:.4f}")
+                return None
+        
+        # Price action signals
+        if patterns:
+            if patterns.get("bullish_engulfing") or patterns.get("bullish_pin"):
+                signal = "buy"
+                confidence += 0.3
+            elif patterns.get("bearish_engulfing") or patterns.get("bearish_pin"):
+                signal = "sell"
+                confidence += 0.3
+            elif patterns.get("doji") and vwap is not None:
+                if price > vwap:
+                    signal = "buy"  # Doji near VWAP support
+                    confidence += 0.2
+                else:
+                    signal = "sell"  # Doji near VWAP resistance
+                    confidence += 0.2
+        
+        # VWAP-based signals
+        if vwap is not None:
+            if price > vwap and len(self.candle_history[symbol]) >= MIN_PRICE_POINTS:
+                if signal == "buy":
+                    confidence += 0.4
+                elif not signal:
+                    signal = "buy"
+                    confidence += 0.4
+            elif price < vwap and len(self.candle_history[symbol]) >= MIN_PRICE_POINTS:
+                if signal == "sell":
+                    confidence += 0.4
+                elif not signal:
+                    signal = "sell"
+                    confidence += 0.4
+            elif abs(price - vwap) / vwap < 0.005:
+                if price > self.price_history[symbol][-2]:
+                    if signal == "buy":
+                        confidence += 0.3
+                    elif not signal:
+                        signal = "buy"
+                        confidence += 0.3
+                else:
+                    if signal == "sell":
+                        confidence += 0.3
+                    elif not signal:
+                        signal = "sell"
+                        confidence += 0.3
+        
+        # Additional indicators
+        if len(self.candle_history[symbol]) >= RSI_PERIOD:
             if macd is not None and macd_signal is not None and ema_fast is not None and ema_slow is not None:
                 if macd > macd_signal and ema_fast > ema_slow:
-                    signal = "buy"
-                    confidence += 0.4
+                    if signal == "buy":
+                        confidence += 0.2
+                    elif not signal:
+                        signal = "buy"
+                        confidence += 0.2
                 elif macd < macd_signal and ema_fast < ema_slow:
-                    signal = "sell"
-                    confidence += 0.4
+                    if signal == "sell":
+                        confidence += 0.2
+                    elif not signal:
+                        signal = "sell"
+                        confidence += 0.2
             
-            # Mean-reversion signals
             if rsi is not None and bb_upper is not None and bb_lower is not None:
                 if rsi < RSI_OVERSOLD and price <= bb_lower:
-                    signal = "buy"
-                    confidence += 0.3
+                    if signal == "buy":
+                        confidence += 0.2
+                    elif not signal:
+                        signal = "buy"
+                        confidence += 0.2
                 elif rsi > RSI_OVERBOUGHT and price >= bb_upper:
-                    signal = "sell"
-                    confidence += 0.3
-            
-            # ML signal
-            if ml_signal:
-                if signal and signal == ml_signal:
-                    confidence += 0.3
-                elif not signal:
-                    signal = ml_signal
-                    confidence += 0.3
+                    if signal == "sell":
+                        confidence += 0.2
+                    elif not signal:
+                        signal = "sell"
+                        confidence += 0.2
+        
+        if ml_signal:
+            if signal and signal == ml_signal:
+                confidence += 0.2
+            elif not signal:
+                signal = ml_signal
+                confidence += 0.2
         
         if not signal or confidence < 0.5:
             return None
@@ -457,11 +609,16 @@ class TradingBot:
                             "args": [{"channel": "tickers", "instId": symbol}]
                         }))
                         logger.info(f"Subscribed to {symbol} ticker")
+                        # Fetch initial candles
+                        candles = self.get_candles(symbol)
+                        if candles:
+                            self.candle_history[symbol] = candles
+                            logger.info(f"Fetched {len(candles)} initial candles for {symbol}")
                     
                     last_order_time = {symbol: 0 for symbol in SYMBOLS}
                     order_interval = 60
                     last_price = {symbol: None for symbol in SYMBOLS}
-                    price_change_threshold = 0.01
+                    price_change_threshold = VOLATILITY_THRESHOLD
                     
                     while True:
                         try:
@@ -470,10 +627,20 @@ class TradingBot:
                             if "data" in data and data["data"]:
                                 symbol = data["arg"]["instId"]
                                 price = float(data["data"][0]["last"])
+                                volume = float(data["data"][0]["lastSize"])
                                 logger.info(f"WebSocket price for {symbol}: ${price}")
                                 self.price_history[symbol].append(price)
+                                self.volume_history[symbol].append(volume)
                                 if len(self.price_history[symbol]) > 100:
                                     self.price_history[symbol] = self.price_history[symbol][-100:]
+                                    self.volume_history[symbol] = self.volume_history[symbol][-100:]
+                                
+                                # Update candles
+                                candles = self.get_candles(symbol, limit=1)
+                                if candles:
+                                    self.candle_history[symbol].append(candles[0])
+                                    if len(self.candle_history[symbol]) > 100:
+                                        self.candle_history[symbol] = self.candle_history[symbol][-100:]
                                 
                                 current_time = time.time()
                                 if last_price[symbol] is None:
@@ -536,12 +703,18 @@ class TradingBot:
         self.initial_balance = self.account_balance
         
         for symbol in SYMBOLS:
-            price = self.get_price(symbol)
-            if not price:
+            price_volume = self.get_price(symbol)
+            if not price_volume:
                 logger.error(f"Failed to get initial price for {symbol}")
                 continue
+            price, volume = price_volume
             logger.info(f"Current price for {symbol}: ${price}")
             self.price_history[symbol].append(price)
+            self.volume_history[symbol].append(volume)
+            candles = self.get_candles(symbol)
+            if candles:
+                self.candle_history[symbol] = candles
+                logger.info(f"Fetched {len(candles)} initial candles for {symbol}")
             signal_info = self.generate_signal(symbol, price)
             if signal_info:
                 signal, confidence = signal_info
