@@ -60,9 +60,8 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
         logger.warning(f"Timestamp offset too large: {timestamp_ms} ms vs system {system_time_ms} ms")
     timestamp = str(timestamp_ms)
     nonce = str(uuid4())
-    # Use simplified path for signature
-    sign_path = path.replace("/api/v1", "", 1) if path.startswith("/api/v1") else path
-    msg = f"{sign_path}{method.upper()}{timestamp}{nonce}"
+    # Use full path for signature
+    msg = f"{path}{method.upper()}{timestamp}{nonce}"
     if body:
         msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
     
