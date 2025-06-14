@@ -13,6 +13,7 @@ import numpy as np
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
+from uuid import uuid4
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import BollingerBands
@@ -81,8 +82,8 @@ if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
     logger.error("Missing API credentials in .env")
     exit(1)
 
-logger.debug(f"API_KEY: {API_KEY[:4]}...{API_KEY[-4:]}")
-logger.debug(f"API_PASSPHRASE: {API_PASSPHRASE[:4]}...{API_PASSPHRASE[-4:]}")
+logger.debug(f"api-key: {API_KEY[:4]}...{API_KEY[-4:]}")
+logger.debug(f"access-passphrase: {API_PASSPHRASE[:4]}...{API_PASSPHRASE[-4:]}")
 
 # Timezone
 LOCAL_TZ = pytz.timezone("America/Los_Angeles")
@@ -99,8 +100,8 @@ class TradingBot:
         self.is_model_trained = {symbol: False for symbol in SYMBOLS}
         self.last_model_train = {symbol: 0 for symbol in SYMBOLS}
 
-    def sign_request(self, method: str, path: str, body: dict | None = None) -> tuple[dict, str, str]:
-        """Generate BloFin API request signature."""
+    def sign_request(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> tuple[dict, str, str]:
+        """Generate BloFin API request signature per api.py."""
         local_time = datetime.now(LOCAL_TZ)
         utc_time = local_time.astimezone(pytz.UTC)
         timestamp_ms = int(utc_time.timestamp() * 1000)
@@ -108,33 +109,40 @@ class TradingBot:
         if abs(timestamp_ms - system_time_ms) > 30000:
             logger.warning(f"Timestamp offset: {timestamp_ms} ms vs system {system_time_ms} ms")
         timestamp = str(timestamp_ms)
-        nonce = str(int(time.time() * 1000))
-        msg = f"{path}{method.upper()}{timestamp}{nonce}"
-        if body:
-            msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
+        nonce = str(uuid4())  # Use UUID per api.py
         
-        secret = API_SECRET.strip()
+        # Build path with query parameters for GET
+        path_with_params = path
+        if params:
+            query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+            path_with_params += f"?{query}"
+        
+        # Build signature content
+        body_str = json.dumps(body, separators=(',', ':'), sort_keys=True) if body else ""
+        content = path_with_params + method.upper() + timestamp + nonce + body_str
+        
         logger.debug(f"Local time: {local_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
         logger.debug(f"UTC time: {utc_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
         logger.debug(f"Timestamp (ms): {timestamp_ms}")
-        logger.debug(f"Signature message: {msg}")
+        logger.debug(f"Signature message: {content}")
         
-        signature = hmac.new(
-            secret.encode('utf-8'),
-            msg.encode('utf-8'),
+        # Generate signature per api.py
+        sign_token = hmac.new(
+            API_SECRET.encode(),
+            content.encode(),
             hashlib.sha256
-        ).digest()
+        ).hexdigest().encode()
+        signature = base64.b64encode(sign_token).decode()
         
-        signature = base64.b64encode(signature).decode('utf-8').strip()
         logger.debug(f"Generated signature: {signature}")
         
         headers = {
-            "ACCESS-KEY": API_KEY.strip(),
-            "ACCESS-SIGN": signature,
-            "ACCESS-TIMESTAMP": timestamp,
-            "ACCESS-NONCE": nonce,
-            "ACCESS-PASSPHRASE": API_PASSPHRASE.strip(),
-            "Content-Type": "application/json"
+            "access-key": API_KEY.strip(),
+            "access-sign": signature,
+            "access-timestamp": timestamp,
+            "access-nonce": nonce,
+            "access-passphrase": API_PASSPHRASE.strip(),
+            "content-type": "application/json"
         }
         logger.debug(f"Request headers: {headers}")
         return headers, timestamp, nonce
@@ -166,7 +174,6 @@ class TradingBot:
                 data = response.json()
                 logger.debug(f"Candle response for {symbol}: {json.dumps(data, indent=2)}")
                 if data.get("code") == "0" and data.get("data"):
-                    # Data format: [ts, open, high, low, close, volume]
                     return [{
                         "timestamp": int(candle[0]),
                         "open": float(candle[1]),
@@ -189,9 +196,10 @@ class TradingBot:
     def get_instrument_info(self, symbol: str) -> dict | None:
         """Get instrument details."""
         path = "/api/v1/market/instruments"
+        params = {"instType": "SWAP", "instId": symbol}
         for attempt in range(3):
             try:
-                response = requests.get(f"{BASE_URL}{path}?instType=SWAP&instId={symbol}", timeout=5)
+                response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
                 response.raise_for_status()
                 data = response.json()
                 logger.info(f"Instrument info for {symbol}: {json.dumps(data, indent=2)}")
@@ -218,9 +226,10 @@ class TradingBot:
     def get_price(self, symbol: str) -> tuple[float, float] | None:
         """Get current market price and volume."""
         path = "/api/v1/market/tickers"
+        params = {"instId": symbol}
         for attempt in range(3):
             try:
-                response = requests.get(f"{BASE_URL}{path}?instId={symbol}", timeout=5)
+                response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
                 response.raise_for_status()
                 data = response.json()
                 logger.info(f"Ticker response for {symbol}: {json.dumps(data, indent=2)}")
@@ -465,10 +474,10 @@ class TradingBot:
                 confidence += 0.3
             elif patterns.get("doji") and vwap is not None:
                 if price > vwap:
-                    signal = "buy"  # Doji near VWAP support
+                    signal = "buy"
                     confidence += 0.2
                 else:
-                    signal = "sell"  # Doji near VWAP resistance
+                    signal = "sell"
                     confidence += 0.2
         
         # VWAP-based signals
@@ -573,7 +582,7 @@ class TradingBot:
         
         for attempt in range(max_retries):
             try:
-                headers, _, _ = self.sign_request("POST", path, order_request)
+                headers, _, _ = self.sign_request("POST", path, body=order_request)
                 response = requests.post(f"{BASE_URL}{path}", headers=headers, json=order_request, timeout=5)
                 response.raise_for_status()
                 data = response.json()
@@ -609,7 +618,6 @@ class TradingBot:
                             "args": [{"channel": "tickers", "instId": symbol}]
                         }))
                         logger.info(f"Subscribed to {symbol} ticker")
-                        # Fetch initial candles
                         candles = self.get_candles(symbol)
                         if candles:
                             self.candle_history[symbol] = candles
@@ -635,7 +643,6 @@ class TradingBot:
                                     self.price_history[symbol] = self.price_history[symbol][-100:]
                                     self.volume_history[symbol] = self.volume_history[symbol][-100:]
                                 
-                                # Update candles
                                 candles = self.get_candles(symbol, limit=1)
                                 if candles:
                                     self.candle_history[symbol].append(candles[0])
