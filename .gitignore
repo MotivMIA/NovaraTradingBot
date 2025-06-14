@@ -38,3 +38,6 @@ Thumbs.db
 # Dependency directories
 node_modules/
 pip_cache/
+
+#Database
+market_data.db
