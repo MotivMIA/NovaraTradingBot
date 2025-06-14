@@ -44,29 +44,13 @@ if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
     logger.error("Missing API credentials in .env")
     exit(1)
 
-# Global time offset for server sync
-TIME_OFFSET = 0
-
-def sync_server_time():
-    """Fetch server time to sync local clock."""
-    global TIME_OFFSET
-    try:
-        response = requests.get(f"{BASE_URL}/api/v1/market/time", timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("code") == "0" and data.get("data"):
-            server_time_ms = int(data["data"]["serverTime"])
-            local_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            TIME_OFFSET = server_time_ms - local_time_ms
-            logger.info(f"Server time synced, offset: {TIME_OFFSET} ms")
-        else:
-            logger.error(f"Failed to sync server time: {data}")
-    except requests.RequestException as e:
-        logger.error(f"Server time sync error: {e}")
-
 def sign_request(secret: str, method: str, path: str, body: dict | None = None) -> tuple[dict, str, str]:
     """Generate BloFin API request signature."""
-    timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000) + TIME_OFFSET)
+    timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    # Ensure timestamp is not too far in future/past (BloFin tolerance ~30s)
+    if abs(timestamp_ms - int(time.time() * 1000)) > 30000:
+        logger.warning(f"Timestamp offset too large: {timestamp_ms}")
+    timestamp = str(timestamp_ms)
     nonce = str(uuid4())
     msg = f"{path}{method.upper()}{timestamp}{nonce}"
     if body:
@@ -97,7 +81,7 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
 
 async def sign_websocket_login(secret: str, api_key: str, passphrase: str) -> tuple[str, str, str]:
     """Generate WebSocket login signature."""
-    timestamp = str(int(time.time() * 1000) + TIME_OFFSET)
+    timestamp = str(int(time.time() * 1000))
     nonce = timestamp
     method = "GET"
     path = "/users/self/verify"
@@ -254,7 +238,6 @@ async def process_bid(price: float):
 
 async def main():
     """Main trading loop."""
-    sync_server_time()  # Sync time before starting
     price = get_price()
     if not price:
         logger.error("Failed to get initial price, exiting.")
