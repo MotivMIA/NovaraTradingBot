@@ -14,7 +14,6 @@ import numpy as np
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
-from uuid import uuid4
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import BollingerBands
@@ -68,6 +67,7 @@ BB_PERIOD = 20
 BB_STD = 2
 ML_LOOKBACK = 50
 MAX_DRAWDOWN = 0.10  # 10% max drawdown
+DEFAULT_BALANCE = 10000.0  # Fallback balance if API fails
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -92,6 +92,7 @@ class TradingBot:
         self.ml_model = LogisticRegression()
         self.scaler = StandardScaler()
         self.is_model_trained = {symbol: False for symbol in SYMBOLS}
+        self.last_model_train = {symbol: 0 for symbol in SYMBOLS}
 
     def sign_request(self, method: str, path: str, body: dict | None = None) -> tuple[dict, str, str]:
         """Generate BloFin API request signature."""
@@ -102,7 +103,7 @@ class TradingBot:
         if abs(timestamp_ms - system_time_ms) > 30000:
             logger.warning(f"Timestamp offset: {timestamp_ms} ms vs system {system_time_ms} ms")
         timestamp = str(timestamp_ms)
-        nonce = str(uuid4())
+        nonce = str(int(time.time() * 1000))  # Timestamp-based nonce
         msg = f"{path}{method.upper()}{timestamp}{nonce}"
         if body:
             msg += json.dumps(body, separators=(',', ':'), sort_keys=True)
@@ -197,8 +198,12 @@ class TradingBot:
                 if data.get("code") == "0" and data.get("data"):
                     for asset in data["data"]:
                         if asset["currency"] == "USDT":
-                            return float(asset["total"])
+                            balance = float(asset["total"])
+                            logger.info(f"Account balance: ${balance:.2f} USDT")
+                            return balance
                 logger.error(f"Unexpected balance response: {data}")
+                if data.get("code") == "152409":
+                    logger.error("Signature verification failed, possible credential mismatch")
                 return None
             except requests.RequestException as e:
                 logger.error(f"Attempt {attempt + 1} failed: {e}")
@@ -207,10 +212,15 @@ class TradingBot:
                 else:
                     logger.error(f"Failed after {attempt + 1} attempts: {e}")
                     return None
-        return None
+        logger.warning(f"Using default balance: ${DEFAULT_BALANCE:.2f} USDT")
+        return DEFAULT_BALANCE
 
     def train_ml_model(self, symbol: str):
         """Train logistic regression model for a symbol."""
+        current_time = time.time()
+        if current_time - self.last_model_train[symbol] < 3600:  # Train every hour
+            return
+        
         prices = self.price_history.get(symbol, [])
         if len(prices) < ML_LOOKBACK + RSI_PERIOD + MACD_SLOW + MACD_SIGNAL:
             logger.warning(f"Insufficient data for {symbol}: {len(prices)} points")
@@ -243,6 +253,7 @@ class TradingBot:
         X_scaled = self.scaler.fit_transform(X)
         self.ml_model.fit(X_scaled, y)
         self.is_model_trained[symbol] = True
+        self.last_model_train[symbol] = current_time
         logger.info(f"ML model trained for {symbol} with {len(df)} data points")
 
     def calculate_indicators(self, symbol: str) -> dict | None:
@@ -490,8 +501,8 @@ class TradingBot:
         """Main trading loop."""
         self.account_balance = self.get_account_balance()
         if not self.account_balance:
-            logger.error("Failed to get initial account balance")
-            return
+            logger.error("Failed to get initial account balance, using default")
+            self.account_balance = DEFAULT_BALANCE
         self.initial_balance = self.account_balance
         
         for symbol in SYMBOLS:
