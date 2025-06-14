@@ -161,39 +161,39 @@ class TradingBot:
             return False
 
     def get_candles(self, symbol: str, limit: int = 100) -> list | None:
-    current_time = time.time()
-    if not hasattr(self, 'last_candle_fetch'):
-        self.last_candle_fetch = {symbol: 0 for symbol in SYMBOLS}
-    if current_time - self.last_candle_fetch[symbol] < 60:
-        return None
-    path = "/api/v1/market/candles"
-    params = {"instId": symbol, "bar": CANDLE_TIMEFRAME, "limit": str(limit)}
-    for attempt in range(3):
-        try:
-            response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            logger.debug(f"Candle response for {symbol}: {json.dumps(data, indent=2)}")
-            if data.get("code") == "0" and data.get("data"):
-                self.last_candle_fetch[symbol] = current_time
-                return [{
-                    "timestamp": int(candle[0]),
-                    "open": float(candle[1]),
-                    "high": float(candle[2]),
-                    "low": float(candle[3]),
-                    "close": float(candle[4]),
-                    "volume": float(candle[5])
-                } for candle in data["data"]]
-            logger.error(f"No candle data for {symbol}")
+        current_time = time.time()
+        if not hasattr(self, 'last_candle_fetch'):
+            self.last_candle_fetch = {symbol: 0 for symbol in SYMBOLS}
+        if current_time - self.last_candle_fetch[symbol] < 60:
             return None
-        except requests.RequestException as e:
-            logger.error(f"Attempt {attempt + 1} failed: {e}")
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-            else:
-                logger.error(f"Failed after {attempt + 1} attempts: {e}")
+        path = "/api/v1/market/candles"
+        params = {"instId": symbol, "bar": CANDLE_TIMEFRAME, "limit": str(limit)}
+        for attempt in range(3):
+            try:
+                response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
+                response.raise_for_status()
+                data = response.json()
+                logger.debug(f"Candle response for {symbol}: {json.dumps(data, indent=2)}")
+                if data.get("code") == "0" and data.get("data"):
+                    self.last_candle_fetch[symbol] = current_time
+                    return [{
+                        "timestamp": int(candle[0]),
+                        "open": float(candle[1]),
+                        "high": float(candle[2]),
+                        "low": float(candle[3]),
+                        "close": float(candle[4]),
+                        "volume": float(candle[5])
+                    } for candle in data["data"]]
+                logger.error(f"No candle data for {symbol}")
                 return None
-    return None
+            except requests.RequestException as e:
+                logger.error(f"Attempt {attempt + 1} failed: {e}")
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Failed after {attempt + 1} attempts: {e}")
+                    return None
+        return None
 
     def get_instrument_info(self, symbol: str) -> dict | None:
         """Get instrument details."""
