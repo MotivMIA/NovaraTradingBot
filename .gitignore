@@ -29,6 +29,7 @@ env/
 # Logs
 *.log
 logs/
+trading_bot.log
 
 # OS files
 .DS_Store
