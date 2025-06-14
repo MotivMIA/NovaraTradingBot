@@ -4,3 +4,4 @@ python-dotenv
 websocket-client
 numpy
 ta
+pytz>=2025.2

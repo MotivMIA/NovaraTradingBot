@@ -38,6 +38,8 @@ SIZE_PRECISION = 8  # Decimal places for size
 
 # Timezone configuration
 LOCAL_TZ = pytz.timezone("America/Los_Angeles")  # PDT
+# Manual timestamp adjustment (ms) to correct Render clock offset (~1 day = 86400000 ms)
+TIMESTAMP_ADJUSTMENT = -86400000  # Adjust as needed
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -53,7 +55,7 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
     # Get current time in PDT and convert to UTC
     local_time = datetime.now(LOCAL_TZ)
     utc_time = local_time.astimezone(pytz.UTC)
-    timestamp_ms = int(utc_time.timestamp() * 1000)
+    timestamp_ms = int(utc_time.timestamp() * 1000) + TIMESTAMP_ADJUSTMENT
     # Validate timestamp against system time
     if abs(timestamp_ms - int(time.time() * 1000)) > 30000:
         logger.warning(f"Timestamp offset too large: {timestamp_ms} ms")
@@ -65,7 +67,8 @@ def sign_request(secret: str, method: str, path: str, body: dict | None = None) 
     
     secret = secret.strip()
     logger.debug(f"Local time (PDT): {local_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
-    logger.debug(f"UTC time: {utc_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
+    logger.debug(f"UTC time (unadjusted): {utc_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
+    logger.debug(f"Adjusted timestamp (ms): {timestamp_ms}")
     logger.debug(f"Signature message: {msg}")
     
     signature = hmac.new(
@@ -92,7 +95,7 @@ async def sign_websocket_login(secret: str, api_key: str, passphrase: str) -> tu
     """Generate WebSocket login signature."""
     local_time = datetime.now(LOCAL_TZ)
     utc_time = local_time.astimezone(pytz.UTC)
-    timestamp = str(int(utc_time.timestamp() * 1000))
+    timestamp = str(int(utc_time.timestamp() * 1000) + TIMESTAMP_ADJUSTMENT)
     nonce = timestamp
     method = "GET"
     path = "/users/self/verify"
