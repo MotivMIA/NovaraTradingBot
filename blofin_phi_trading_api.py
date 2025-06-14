@@ -10,6 +10,7 @@ import requests
 import websockets
 import pandas as pd
 import numpy as np
+import socket
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
@@ -45,6 +46,9 @@ logger = logging.getLogger(__name__)
 for handler in logger.handlers:
     handler.setFormatter(MicrosecondFormatter(fmt="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S,%f"))
 
+# Log hostname for IP debugging
+logger.debug(f"Local hostname: {socket.gethostname()}")
+
 # Load environment variables
 load_dotenv()
 
@@ -53,7 +57,7 @@ DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
 BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
 WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public" if DEMO_MODE else "wss://openapi.blofin.com/ws/public"
 SYMBOLS = os.getenv("SYMBOLS", "BTC-USDT,ETH-USDT,XRP-USDT").split(",")
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.01))  # 1% risk
+RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.01))  # Base 1% risk
 SIZE_PRECISION = 8
 RSI_PERIOD = 14
 MACD_FAST = 12
@@ -68,10 +72,11 @@ BB_STD = 2
 ML_LOOKBACK = 50
 MAX_DRAWDOWN = 0.10  # 10% max drawdown
 DEFAULT_BALANCE = 10000.0  # Fallback balance
-MIN_PRICE_POINTS = 5  # Minimum data for initial signals
+MIN_PRICE_POINTS = 5  # Minimum data for signals
 VWAP_PERIOD = 20  # VWAP calculation period
 VOLATILITY_THRESHOLD = 0.02  # Min price change for volatile pairs
-CANDLE_TIMEFRAME = "1m"  # 1-minute candles for price action
+CANDLE_TIMEFRAME = "1m"  # 1-minute candles
+CANDLE_FETCH_INTERVAL = 60  # Fetch candles every 60 seconds
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -93,6 +98,7 @@ class TradingBot:
         self.candle_history = {symbol: [] for symbol in SYMBOLS}  # OHLC candles
         self.price_history = {symbol: [] for symbol in SYMBOLS}  # Last prices
         self.volume_history = {symbol: [] for symbol in SYMBOLS}
+        self.last_candle_fetch = {symbol: 0 for symbol in SYMBOLS}  # Cache candle fetch times
         self.account_balance = None
         self.initial_balance = None
         self.ml_model = LogisticRegression()
@@ -161,10 +167,9 @@ class TradingBot:
             return False
 
     def get_candles(self, symbol: str, limit: int = 100) -> list | None:
+        """Fetch candlestick data with rate limit mitigation."""
         current_time = time.time()
-        if not hasattr(self, 'last_candle_fetch'):
-            self.last_candle_fetch = {symbol: 0 for symbol in SYMBOLS}
-        if current_time - self.last_candle_fetch[symbol] < 60:
+        if current_time - self.last_candle_fetch[symbol] < CANDLE_FETCH_INTERVAL:
             return None
         path = "/api/v1/market/candles"
         params = {"instId": symbol, "bar": CANDLE_TIMEFRAME, "limit": str(limit)}
@@ -283,7 +288,7 @@ class TradingBot:
     def detect_price_action_patterns(self, symbol: str) -> dict | None:
         """Detect candlestick patterns for price action."""
         candles = self.candle_history.get(symbol, [])
-        if len(candles) < 2:
+        if len(candles) < 7:  # Need 7 for head-and-shoulders
             logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} candles")
             return None
         
@@ -291,6 +296,7 @@ class TradingBot:
         previous = candles[-2]
         patterns = {}
         
+        # Bullish/Bearish Engulfing
         current_body = abs(current["close"] - current["open"])
         previous_body = abs(previous["close"] - previous["open"])
         if current_body > previous_body:
@@ -301,6 +307,7 @@ class TradingBot:
                 if current["open"] >= previous["close"] and current["close"] <= previous["open"]:
                     patterns["bearish_engulfing"] = True
         
+        # Pin Bar
         body = abs(current["close"] - current["open"])
         upper_wick = current["high"] - max(current["open"], current["close"])
         lower_wick = min(current["open"], current["close"]) - current["low"]
@@ -311,8 +318,14 @@ class TradingBot:
             elif lower_wick > 2 * body:
                 patterns["bullish_pin"] = True
         
+        # Doji
         if body / total_range < 0.05:
             patterns["doji"] = True
+        
+        # Head-and-Shoulders (Bearish)
+        prices = [c["high"] for c in candles[-7:]]
+        if prices[2] < prices[3] > prices[4] and prices[0] < prices[3] and prices[5] < prices[3]:
+            patterns["head_and_shoulders"] = True
         
         if patterns:
             logger.debug(f"Price action patterns for {symbol}: {patterns}")
@@ -439,6 +452,10 @@ class TradingBot:
 
     def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float] | None:
         """Generate VWAP and price action-driven trading signal."""
+        if len(self.price_history[symbol]) < MIN_PRICE_POINTS:
+            logger.warning(f"Skipping signal for {symbol}: insufficient price data")
+            return None
+        
         indicators = self.calculate_indicators(symbol)
         patterns = self.detect_price_action_patterns(symbol)
         if not indicators or not indicators["price"]:
@@ -458,17 +475,16 @@ class TradingBot:
         confidence = 0.0
         signal = None
         
-        if len(self.price_history[symbol]) >= 2:
-            price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
-            if price_change < VOLATILITY_THRESHOLD:
-                logger.debug(f"Low volatility for {symbol}: {price_change:.4f}")
-                return None
+        price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
+        if price_change < VOLATILITY_THRESHOLD:
+            logger.debug(f"Low volatility for {symbol}: {price_change:.4f}")
+            return None
         
         if patterns:
             if patterns.get("bullish_engulfing") or patterns.get("bullish_pin"):
                 signal = "buy"
                 confidence += 0.3
-            elif patterns.get("bearish_engulfing") or patterns.get("bearish_pin"):
+            elif patterns.get("bearish_engulfing") or patterns.get("bearish_pin") or patterns.get("head_and_shoulders"):
                 signal = "sell"
                 confidence += 0.3
             elif patterns.get("doji") and vwap is not None:
@@ -657,7 +673,7 @@ class TradingBot:
                                     if signal_info:
                                         signal, confidence = signal_info
                                         logger.info(f"Signal for {symbol}: {signal} with confidence {confidence:.2f}")
-                                        await self.process_trade(symbol, price, signal)
+                                        await self.process_trade(symbol, price, signal, price_change)
                                         last_order_time[symbol] = current_time
                                         last_price[symbol] = price
                             await asyncio.sleep(0.2)
@@ -674,8 +690,8 @@ class TradingBot:
                     logger.error(f"Failed after {max_retries} attempts")
                     break
 
-    async def process_trade(self, symbol: str, price: float, side: str):
-        """Process trade with risk management."""
+    async def process_trade(self, symbol: str, price: float, side: str, price_change: float):
+        """Process trade with dynamic risk management."""
         if not self.account_balance:
             self.account_balance = self.get_account_balance()
             if not self.account_balance:
@@ -688,7 +704,11 @@ class TradingBot:
             logger.error(f"Max drawdown reached for {symbol}: {self.account_balance:.2f}/{self.initial_balance:.2f}")
             return
         
-        risk_amount = self.account_balance * RISK_PER_TRADE
+        # Dynamic risk based on volatility
+        risk_factor = min(2, max(0.5, price_change / VOLATILITY_THRESHOLD))
+        risk_amount = self.account_balance * RISK_PER_TRADE * risk_factor
+        logger.debug(f"Dynamic risk for {symbol}: {risk_factor:.2f}x, amount: ${risk_amount:.2f}")
+        
         order_id = self.place_order(symbol, price, risk_amount, side)
         if order_id:
             logger.info(f"Trade executed for {symbol}: {side} ${risk_amount:.2f} at ${price}")
@@ -722,8 +742,9 @@ class TradingBot:
             signal_info = self.generate_signal(symbol, price)
             if signal_info:
                 signal, confidence = signal_info
+                price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2] if len(self.price_history[symbol]) >= 2 else VOLATILITY_THRESHOLD
                 logger.info(f"Initial signal for {symbol}: {signal} with confidence {confidence:.2f}")
-                await self.process_trade(symbol, price, signal)
+                await self.process_trade(symbol, price, signal, price_change)
         
         await self.ws_connect()
 
