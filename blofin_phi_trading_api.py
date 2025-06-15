@@ -13,6 +13,8 @@ import numpy as np
 import socket
 import sqlite3
 import glob
+import sys
+import argparse
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
@@ -39,11 +41,9 @@ def setup_logging():
     log_dir = os.path.join(os.path.dirname(__file__), "logs")
     os.makedirs(log_dir, exist_ok=True)
     
-    # Generate log filename with timestamp
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file = os.path.join(log_dir, f"trading_bot_{timestamp}.log")
     
-    # Configure logger
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -57,7 +57,6 @@ def setup_logging():
     for handler in logger.handlers:
         handler.setFormatter(MicrosecondFormatter(fmt="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S,%f"))
     
-    # Keep only the 5 most recent logs
     log_files = glob.glob(os.path.join(log_dir, "trading_bot_*.log"))
     log_files.sort(key=os.path.getctime, reverse=True)
     for old_log in log_files[5:]:
@@ -71,7 +70,6 @@ def setup_logging():
 
 logger = setup_logging()
 
-# Log hostname for IP debugging
 logger.debug(f"Local hostname: {socket.gethostname()}")
 
 # Load environment variables
@@ -82,7 +80,7 @@ DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
 BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
 WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public" if DEMO_MODE else "wss://openapi.blofin.com/ws/public"
 SYMBOLS = os.getenv("SYMBOLS", "BTC-USDT,ETH-USDT,XRP-USDT").split(",")
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.01))  # 1% risk
+RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.01))
 SIZE_PRECISION = 8
 RSI_PERIOD = 14
 MACD_FAST = 12
@@ -95,15 +93,15 @@ EMA_SLOW = 26
 BB_PERIOD = 20
 BB_STD = 2
 ML_LOOKBACK = 50
-MAX_DRAWDOWN = 0.10  # 10% max drawdown
-DEFAULT_BALANCE = 10000.0  # Fallback balance
-MIN_PRICE_POINTS = 3  # Reduced for faster signals
-VWAP_PERIOD = 20  # VWAP calculation period
-VOLATILITY_THRESHOLD = 0.02  # Min price change for volatile pairs
-CANDLE_TIMEFRAME = "1m"  # 1-minute candles
-CANDLE_FETCH_INTERVAL = 60  # Fetch candles every 60 seconds
-CANDLE_LIMIT = 1000  # Fetch up to 1000 candles
-DB_PATH = os.path.join(os.path.dirname(__file__), "market_data.db")  # Database path
+MAX_DRAWDOWN = 0.10
+DEFAULT_BALANCE = 10000.0
+MIN_PRICE_POINTS = 2  # Reduced for Render
+VWAP_PERIOD = 20
+VOLATILITY_THRESHOLD = 0.02
+CANDLE_TIMEFRAME = "1m"
+CANDLE_FETCH_INTERVAL = 60
+CANDLE_LIMIT = 1000
+DB_PATH = os.path.join("/opt/render/project/src/db", "market_data.db") if os.getenv("RENDER") else os.path.join(os.path.dirname(__file__), "market_data.db")
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -122,10 +120,10 @@ LOCAL_TZ = pytz.timezone("America/Los_Angeles")
 
 class TradingBot:
     def __init__(self):
-        self.candle_history = {symbol: [] for symbol in SYMBOLS}  # OHLC candles
-        self.price_history = {symbol: [] for symbol in SYMBOLS}  # Last prices
+        self.candle_history = {symbol: [] for symbol in SYMBOLS}
+        self.price_history = {symbol: [] for symbol in SYMBOLS}
         self.volume_history = {symbol: [] for symbol in SYMBOLS}
-        self.last_candle_fetch = {symbol: 0 for symbol in SYMBOLS}  # Cache candle fetch times
+        self.last_candle_fetch = {symbol: 0 for symbol in SYMBOLS}
         self.account_balance = None
         self.initial_balance = None
         self.ml_model = LogisticRegression()
@@ -134,10 +132,9 @@ class TradingBot:
         self.last_model_train = {symbol: 0 for symbol in SYMBOLS}
 
     def save_candles(self, symbol: str):
-        """Save candle history to SQLite with error handling."""
         try:
             conn = sqlite3.connect(DB_PATH)
-            os.chmod(DB_PATH, 0o666) if os.path.exists(DB_PATH) else None  # Ensure writable
+            os.chmod(DB_PATH, 0o666) if os.path.exists(DB_PATH) else None
             df = pd.DataFrame(self.candle_history[symbol])
             if not df.empty:
                 table_name = symbol.replace("-", "_") + "_candles"
@@ -152,7 +149,6 @@ class TradingBot:
             logger.error(f"Unexpected error saving candles for {symbol}: {e}")
 
     def load_candles(self, symbol: str):
-        """Load candle history from SQLite with error handling."""
         try:
             conn = sqlite3.connect(DB_PATH)
             table_name = symbol.replace("-", "_") + "_candles"
@@ -166,7 +162,6 @@ class TradingBot:
             logger.error(f"Unexpected error loading candles for {symbol}: {e}")
 
     def sign_request(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> tuple[dict, str, str]:
-        """Generate BloFin API request signature."""
         local_time = datetime.now(LOCAL_TZ)
         utc_time = local_time.astimezone(pytz.UTC)
         timestamp_ms = int(utc_time.timestamp() * 1000)
@@ -210,7 +205,6 @@ class TradingBot:
         return headers, timestamp, nonce
 
     def validate_credentials(self) -> bool:
-        """Validate API credentials with a test request."""
         path = "/api/v1/market/tickers"
         try:
             response = requests.get(f"{BASE_URL}{path}?instId={SYMBOLS[0]}", timeout=5)
@@ -226,7 +220,6 @@ class TradingBot:
             return False
 
     def get_candles(self, symbol: str, limit: int = CANDLE_LIMIT) -> list | None:
-        """Fetch candlestick data with rate limit mitigation."""
         current_time = time.time()
         if current_time - self.last_candle_fetch[symbol] < CANDLE_FETCH_INTERVAL:
             logger.debug(f"Skipping candle fetch for {symbol}: within {CANDLE_FETCH_INTERVAL}s interval")
@@ -262,7 +255,6 @@ class TradingBot:
         return None
 
     def get_instrument_info(self, symbol: str) -> dict | None:
-        """Get instrument details."""
         path = "/api/v1/market/instruments"
         params = {"instType": "SWAP", "instId": symbol}
         for attempt in range(3):
@@ -292,7 +284,6 @@ class TradingBot:
         return None
 
     def get_price(self, symbol: str) -> tuple[float, float] | None:
-        """Get current market price and volume."""
         path = "/api/v1/market/tickers"
         params = {"instId": symbol}
         for attempt in range(3):
@@ -315,7 +306,6 @@ class TradingBot:
         return None
 
     def get_account_balance(self) -> float | None:
-        """Get account balance in USDT with retry."""
         import urllib.request
         try:
             outbound_ip = urllib.request.urlopen('https://api.ipify.org').read().decode()
@@ -357,9 +347,8 @@ class TradingBot:
         return DEFAULT_BALANCE
 
     def detect_price_action_patterns(self, symbol: str) -> dict | None:
-        """Detect candlestick patterns for price action."""
         candles = self.candle_history.get(symbol, [])
-        if len(candles) < 7:  # Need 7 for head-and-shoulders
+        if len(candles) < 7:
             logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} candles")
             return None
         
@@ -400,7 +389,6 @@ class TradingBot:
         return None
 
     def calculate_vwap(self, symbol: str) -> float | None:
-        """Calculate VWAP for the last VWAP_PERIOD candles."""
         candles = self.candle_history.get(symbol, [])
         if len(candles) < VWAP_PERIOD:
             logger.warning(f"Insufficient candle data for VWAP calculation for {symbol}: {len(candles)} candles")
@@ -414,7 +402,6 @@ class TradingBot:
         return vwap
 
     def train_ml_model(self, symbol: str):
-        """Train logistic regression model for a symbol."""
         current_time = time.time()
         if current_time - self.last_model_train[symbol] < 3600:
             return
@@ -455,7 +442,6 @@ class TradingBot:
         logger.info(f"ML model trained for {symbol} with {len(df)} data points")
 
     def calculate_indicators(self, symbol: str) -> dict | None:
-        """Calculate technical indicators including VWAP."""
         candles = self.candle_history.get(symbol, [])
         if len(candles) < MIN_PRICE_POINTS:
             logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} candles")
@@ -485,7 +471,6 @@ class TradingBot:
         return indicators
 
     def predict_ml_signal(self, symbol: str, indicators: dict) -> tuple[str, float] | None:
-        """Generate ML-based signal with confidence."""
         if not self.is_model_trained.get(symbol, False):
             self.train_ml_model(symbol)
             if not self.is_model_trained[symbol]:
@@ -518,7 +503,6 @@ class TradingBot:
         return ("buy" if prediction[1] > prediction[0] else "sell", confidence)
 
     def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float] | None:
-        """Generate VWAP and price action-driven trading signal."""
         if len(self.price_history[symbol]) < MIN_PRICE_POINTS or len(self.candle_history[symbol]) < MIN_PRICE_POINTS:
             logger.warning(f"Skipping signal for {symbol}: insufficient data (price: {len(self.price_history[symbol])}, candles: {len(self.candle_history[symbol])})")
             return None
@@ -639,7 +623,6 @@ class TradingBot:
         return signal, confidence
 
     def place_order(self, symbol: str, price: float, size_usd: float, side: str, max_retries: int = 3) -> str | None:
-        """Place a limit order with stop-loss and take-profit."""
         logger.info(f"Attempting to place {side} order for {symbol}: ${size_usd:.2f} at ${price}")
         path = "/api/v1/trade/order"
         inst_info = self.get_instrument_info(symbol)
@@ -695,13 +678,12 @@ class TradingBot:
                     return None
         return None
 
-    async def ws_connect(self, max_retries: int = 5):
-        """Connect to WebSocket for multiple symbols."""
+    async def ws_connect(self, max_retries: int = 10):
         retry_count = 0
         while retry_count < max_retries:
             logger.debug(f"WebSocket connection attempt to {WS_URL} at {datetime.now(LOCAL_TZ)}")
             try:
-                async with websockets.connect(WS_URL) as ws:
+                async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
                     logger.info("WebSocket connected")
                     for symbol in SYMBOLS:
                         await ws.send(json.dumps({
@@ -723,7 +705,7 @@ class TradingBot:
                     
                     while True:
                         try:
-                            data = json.loads(await ws.recv())
+                            data = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
                             logger.info(f"WebSocket data: {json.dumps(data, indent=2)}")
                             if "data" in data and data["data"]:
                                 symbol = data["arg"]["instId"]
@@ -758,7 +740,7 @@ class TradingBot:
                                         last_order_time[symbol] = current_time
                                         last_price[symbol] = price
                             await asyncio.sleep(0.2)
-                        except (websockets.exceptions.ConnectionClosed, json.JSONDecodeError) as e:
+                        except (websockets.exceptions.ConnectionClosed, json.JSONDecodeError, asyncio.TimeoutError) as e:
                             logger.error(f"WebSocket error: {e}")
                             break
             except Exception as e:
@@ -772,7 +754,6 @@ class TradingBot:
                     break
 
     async def process_trade(self, symbol: str, price: float, side: str, price_change: float):
-        """Process trade with dynamic risk management."""
         if not self.account_balance:
             self.account_balance = self.get_account_balance()
             if not self.account_balance:
@@ -792,10 +773,37 @@ class TradingBot:
         order_id = self.place_order(symbol, price, risk_amount, side)
         if order_id:
             logger.info(f"Trade executed for {symbol}: {side} ${risk_amount:.2f} at ${price}")
-            self.account_balance -= risk_amount * 0.01  # Approximate fee impact
+            self.account_balance -= risk_amount * 0.01
+
+    async def health_check(self):
+        logger.info("Running health check")
+        try:
+            if not self.validate_credentials():
+                logger.error("Health check failed: Credential validation")
+                return False
+            balance = self.get_account_balance()
+            if balance is None:
+                logger.error("Health check failed: Could not retrieve balance")
+                return False
+            logger.info("Health check passed: API reachable, balance retrieved")
+            return True
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return False
 
     async def main(self):
-        """Main trading loop."""
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--health-check", action="store_true", help="Run health check and exit")
+        args = parser.parse_args()
+
+        if args.health_check:
+            if await self.health_check():
+                logger.info("Health check completed successfully")
+                sys.exit(0)
+            else:
+                logger.error("Health check failed")
+                sys.exit(1)
+
         if not self.validate_credentials():
             logger.error("Credential validation failed, exiting")
             return
