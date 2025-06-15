@@ -79,7 +79,7 @@ VOLATILITY_THRESHOLD = 0.02  # Min price change for volatile pairs
 CANDLE_TIMEFRAME = "1m"  # 1-minute candles
 CANDLE_FETCH_INTERVAL = 60  # Fetch candles every 60 seconds
 CANDLE_LIMIT = 1000  # Fetch up to 1000 candles at startup
-DB_PATH = "market_data.db"  # Database path
+DB_PATH = os.path.join(os.path.dirname(__file__), "market_data.db")  # Database path
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -115,8 +115,9 @@ class TradingBot:
             conn = sqlite3.connect(DB_PATH)
             df = pd.DataFrame(self.candle_history[symbol])
             if not df.empty:
-                df.to_sql(f"{symbol}_candles", conn, if_exists='replace', index=False)
-                logger.debug(f"Saved {len(df)} candles for {symbol} to {DB_PATH}")
+                table_name = symbol.replace("-", "_") + "_candles"
+                df.to_sql(table_name, conn, if_exists='replace', index=False)
+                logger.debug(f"Saved {len(df)} candles for {symbol} to {DB_PATH} (table: {table_name})")
             else:
                 logger.warning(f"No candles to save for {symbol}")
             conn.close()
@@ -129,9 +130,10 @@ class TradingBot:
         """Load candle history from SQLite with error handling."""
         try:
             conn = sqlite3.connect(DB_PATH)
-            df = pd.read_sql(f"SELECT * FROM {symbol}_candles", conn)
+            table_name = symbol.replace("-", "_") + "_candles"
+            df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
             self.candle_history[symbol] = df.to_dict('records')
-            logger.info(f"Loaded {len(self.candle_history[symbol])} candles for {symbol} from {DB_PATH}")
+            logger.info(f"Loaded {len(self.candle_history[symbol])} candles for {symbol} from {DB_PATH} (table: {table_name})")
             conn.close()
         except sqlite3.Error as e:
             logger.debug(f"No stored candles found for {symbol} or database error: {e}")
