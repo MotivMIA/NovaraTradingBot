@@ -316,6 +316,12 @@ class TradingBot:
 
     def get_account_balance(self) -> float | None:
         """Get account balance in USDT with retry."""
+        import urllib.request
+        try:
+            outbound_ip = urllib.request.urlopen('https://api.ipify.org').read().decode()
+            logger.debug(f"Outbound IP: {outbound_ip}")
+        except Exception as e:
+            logger.error(f"Failed to get outbound IP: {e}")
         path = "/api/v1/account/balance"
         for attempt in range(5):
             headers, _, _ = self.sign_request("GET", path)
