@@ -137,6 +137,7 @@ class TradingBot:
         """Save candle history to SQLite with error handling."""
         try:
             conn = sqlite3.connect(DB_PATH)
+            os.chmod(DB_PATH, 0o666) if os.path.exists(DB_PATH) else None  # Ensure writable
             df = pd.DataFrame(self.candle_history[symbol])
             if not df.empty:
                 table_name = symbol.replace("-", "_") + "_candles"
@@ -692,7 +693,7 @@ class TradingBot:
         """Connect to WebSocket for multiple symbols."""
         retry_count = 0
         while retry_count < max_retries:
-            logger.debug(f"Attempting WebSocket connection (attempt {retry_count + 1}/{max_retries})")
+            logger.debug(f"WebSocket connection attempt to {WS_URL} at {datetime.now(LOCAL_TZ)}")
             try:
                 async with websockets.connect(WS_URL) as ws:
                     logger.info("WebSocket connected")
@@ -819,7 +820,7 @@ class TradingBot:
                 signal, confidence = signal_info
                 price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2] if len(self.price_history[symbol]) >= 2 else VOLATILITY_THRESHOLD
                 logger.info(f"Initial signal for {symbol}: {signal} with confidence {confidence:.2f}")
-                await self.process_trade(symbol, place, signal, price_change)
+                await self.process_trade(symbol, price, signal, price_change)
         
         await self.ws_connect()
 
