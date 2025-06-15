@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 import socket
 import sqlite3
+import glob
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
@@ -33,19 +34,42 @@ class MicrosecondFormatter(logging.Formatter):
             s = f"{t},{int(record.msecs * 1000):06d}"
         return s
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S,%f",
-    handlers=[
-        logging.FileHandler("trading_bot.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-for handler in logger.handlers:
-    handler.setFormatter(MicrosecondFormatter(fmt="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S,%f"))
+# Configure logging with a new file per run
+def setup_logging():
+    log_dir = os.path.join(os.path.dirname(__file__), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Generate log filename with timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_file = os.path.join(log_dir, f"trading_bot_{timestamp}.log")
+    
+    # Configure logger
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S,%f",
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    for handler in logger.handlers:
+        handler.setFormatter(MicrosecondFormatter(fmt="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S,%f"))
+    
+    # Keep only the 5 most recent logs
+    log_files = glob.glob(os.path.join(log_dir, "trading_bot_*.log"))
+    log_files.sort(key=os.path.getctime, reverse=True)
+    for old_log in log_files[5:]:
+        try:
+            os.remove(old_log)
+            logger.debug(f"Deleted old log file: {old_log}")
+        except Exception as e:
+            logger.error(f"Failed to delete old log file {old_log}: {e}")
+    
+    return logger
+
+logger = setup_logging()
 
 # Log hostname for IP debugging
 logger.debug(f"Local hostname: {socket.gethostname()}")
@@ -609,6 +633,7 @@ class TradingBot:
 
     def place_order(self, symbol: str, price: float, size_usd: float, side: str, max_retries: int = 3) -> str | None:
         """Place a limit order with stop-loss and take-profit."""
+        logger.info(f"Attempting to place {side} order for {symbol}: ${size_usd:.2f} at ${price}")
         path = "/api/v1/trade/order"
         inst_info = self.get_instrument_info(symbol)
         if not inst_info:
@@ -667,8 +692,10 @@ class TradingBot:
         """Connect to WebSocket for multiple symbols."""
         retry_count = 0
         while retry_count < max_retries:
+            logger.debug(f"Attempting WebSocket connection (attempt {retry_count + 1}/{max_retries})")
             try:
                 async with websockets.connect(WS_URL) as ws:
+                    logger.info("WebSocket connected")
                     for symbol in SYMBOLS:
                         await ws.send(json.dumps({
                             "op": "subscribe",
@@ -792,7 +819,7 @@ class TradingBot:
                 signal, confidence = signal_info
                 price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2] if len(self.price_history[symbol]) >= 2 else VOLATILITY_THRESHOLD
                 logger.info(f"Initial signal for {symbol}: {signal} with confidence {confidence:.2f}")
-                await self.process_trade(symbol, price, signal, price_change)
+                await self.process_trade(symbol, place, signal, price_change)
         
         await self.ws_connect()
 
