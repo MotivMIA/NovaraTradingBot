@@ -204,6 +204,7 @@ class TradingBot:
         """Fetch candlestick data with rate limit mitigation."""
         current_time = time.time()
         if current_time - self.last_candle_fetch[symbol] < CANDLE_FETCH_INTERVAL:
+            logger.debug(f"Skipping candle fetch for {symbol}: within {CANDLE_FETCH_INTERVAL}s interval")
             return None
         path = "/api/v1/market/candles"
         params = {"instId": symbol, "bar": CANDLE_TIMEFRAME, "limit": str(limit)}
@@ -452,8 +453,8 @@ class TradingBot:
         logger.debug(f"{symbol} indicators - VWAP: {indicators.get('vwap', 'N/A')}, RSI: {indicators.get('rsi', 'N/A')}")
         return indicators
 
-    def predict_ml_signal(self, symbol: str, indicators: dict) -> str | None:
-        """Generate ML-based signal."""
+    def predict_ml_signal(self, symbol: str, indicators: dict) -> tuple[str, float] | None:
+        """Generate ML-based signal with confidence."""
         if not self.is_model_trained.get(symbol, False):
             self.train_ml_model(symbol)
             if not self.is_model_trained[symbol]:
@@ -483,7 +484,7 @@ class TradingBot:
         if confidence < 0.6:
             return None
         
-        return "buy" if prediction[1] > prediction[0] else "sell"
+        return ("buy" if prediction[1] > prediction[0] else "sell", confidence)
 
     def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float] | None:
         """Generate VWAP and price action-driven trading signal."""
@@ -494,6 +495,7 @@ class TradingBot:
         indicators = self.calculate_indicators(symbol)
         patterns = self.detect_price_action_patterns(symbol)
         if not indicators or not indicators["price"]:
+            logger.warning(f"No indicators available for {symbol}")
             return None
         
         vwap = indicators.get("vwap")
@@ -510,9 +512,13 @@ class TradingBot:
         confidence = 0.0
         signal = None
         
-        price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
-        if price_change < VOLATILITY_THRESHOLD:
-            logger.debug(f"Low volatility for {symbol}: {price_change:.4f}")
+        if len(self.price_history[symbol]) >= 2:
+            price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
+            if price_change < VOLATILITY_THRESHOLD:
+                logger.debug(f"Low volatility for {symbol}: {price_change:.4f}")
+                return None
+        else:
+            logger.debug(f"Insufficient price history for volatility check: {len(self.price_history[symbol])} points")
             return None
         
         if patterns:
@@ -531,13 +537,13 @@ class TradingBot:
                     confidence += 0.2
         
         if vwap is not None:
-            if price > vwap and len(self.candle_history[symbol]) >= MIN_PRICE_POINTS:
+            if price > vwap:
                 if signal == "buy":
                     confidence += 0.4
                 elif not signal:
                     signal = "buy"
                     confidence += 0.4
-            elif price < vwap and len(self.candle_history[symbol]) >= MIN_PRICE_POINTS:
+            elif price < vwap:
                 if signal == "sell":
                     confidence += 0.4
                 elif not signal:
@@ -587,15 +593,18 @@ class TradingBot:
                         confidence += 0.2
         
         if ml_signal:
-            if signal and signal == ml_signal:
-                confidence += 0.2
+            ml_side, ml_confidence = ml_signal
+            if signal and signal == ml_side:
+                confidence += ml_confidence * 0.2
             elif not signal:
-                signal = ml_signal
-                confidence += 0.2
+                signal = ml_side
+                confidence += ml_confidence * 0.2
         
         if not signal or confidence < 0.5:
+            logger.debug(f"No valid signal for {symbol}: confidence {confidence:.2f}")
             return None
         
+        logger.info(f"Generated signal for {symbol}: {signal} with confidence {confidence:.2f}")
         return signal, confidence
 
     def place_order(self, symbol: str, price: float, size_usd: float, side: str, max_retries: int = 3) -> str | None:
@@ -624,7 +633,7 @@ class TradingBot:
             "positionSide": "net",
             "side": side,
             "orderType": "limit",
-            "price": str(round(price, 2)),
+            "price": str(round(price, SIZE_PRECISION)),
             "size": str(size)
         }
         
