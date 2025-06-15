@@ -1,9 +1,7 @@
-requests
-websockets
-python-dotenv
-websocket-client
-numpy
-ta
-pytz>=2025.2
-pandas
-scikit-learn
+requests==2.31.0
+websockets==11.0.3
+pandas==2.0.3
+numpy==1.24.3
+python-dotenv==1.0.0
+scikit-learn==1.2.2
+ta==0.10.2
