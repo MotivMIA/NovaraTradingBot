@@ -58,7 +58,7 @@ DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
 BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
 WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public" if DEMO_MODE else "wss://openapi.blofin.com/ws/public"
 SYMBOLS = os.getenv("SYMBOLS", "BTC-USDT,ETH-USDT,XRP-USDT").split(",")
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.01))  # Base 1% risk
+RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.01))  # 1% risk
 SIZE_PRECISION = 8
 RSI_PERIOD = 14
 MACD_FAST = 12
@@ -73,12 +73,12 @@ BB_STD = 2
 ML_LOOKBACK = 50
 MAX_DRAWDOWN = 0.10  # 10% max drawdown
 DEFAULT_BALANCE = 10000.0  # Fallback balance
-MIN_PRICE_POINTS = 5  # Minimum data for signals
+MIN_PRICE_POINTS = 3  # Reduced for faster signals
 VWAP_PERIOD = 20  # VWAP calculation period
 VOLATILITY_THRESHOLD = 0.02  # Min price change for volatile pairs
 CANDLE_TIMEFRAME = "1m"  # 1-minute candles
 CANDLE_FETCH_INTERVAL = 60  # Fetch candles every 60 seconds
-CANDLE_LIMIT = 1000  # Fetch up to 1000 candles at startup
+CANDLE_LIMIT = 1000  # Fetch up to 1000 candles
 DB_PATH = os.path.join(os.path.dirname(__file__), "market_data.db")  # Database path
 
 # Credentials
@@ -141,7 +141,7 @@ class TradingBot:
             logger.error(f"Unexpected error loading candles for {symbol}: {e}")
 
     def sign_request(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> tuple[dict, str, str]:
-        """Generate BloFin API request signature per api.py."""
+        """Generate BloFin API request signature."""
         local_time = datetime.now(LOCAL_TZ)
         utc_time = local_time.astimezone(pytz.UTC)
         timestamp_ms = int(utc_time.timestamp() * 1000)
@@ -663,7 +663,7 @@ class TradingBot:
                     return None
         return None
 
-    async def ws_connect(self, max_retries: int = 3):
+    async def ws_connect(self, max_retries: int = 5):
         """Connect to WebSocket for multiple symbols."""
         retry_count = 0
         while retry_count < max_retries:
