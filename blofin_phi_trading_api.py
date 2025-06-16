@@ -350,40 +350,43 @@ class TradingBot:
 
     def detect_price_action_patterns(self, symbol: str) -> dict | None:
         candles = self.candle_history.get(symbol, [])
-        if len(candles) < 7:
+        if len(candles) < 3:  # Need at least 3 candles for patterns
             logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} candles")
             return None
         
+        patterns = {}
         current = candles[-1]
         previous = candles[-2]
-        patterns = {}
+        prev_prev = candles[-3] if len(candles) >= 3 else None
         
+        # Bullish/Bearish Engulfing
         current_body = abs(current["close"] - current["open"])
         previous_body = abs(previous["close"] - previous["open"])
         if current_body > previous_body:
-            if current["close"] > current["open"] and previous["close"] < previous["open"]:
-                if current["open"] <= previous["close"] and current["close"] >= previous["open"]:
-                    patterns["bullish_engulfing"] = True
-            elif current["close"] < current["open"] and previous["close"] > previous["open"]:
-                if current["open"] >= previous["close"] and current["close"] <= previous["open"]:
-                    patterns["bearish_engulfing"] = True
+            if (current["close"] > current["open"] and previous["close"] < previous["open"] and
+                    current["open"] <= previous["close"] and current["close"] >= previous["open"]):
+                patterns["bullish_engulfing"] = True
+            elif (current["close"] < current["open"] and previous["close"] > previous["open"] and
+                    current["open"] >= previous["close"] and current["close"] <= previous["open"]):
+                patterns["bearish_engulfing"] = True
         
-        body = abs(current["close"] - current["open"])
+        # Pin Bar
+        total_range = current["high"] - current["low"]
         upper_wick = current["high"] - max(current["open"], current["close"])
         lower_wick = min(current["open"], current["close"]) - current["low"]
-        total_range = current["high"] - current["low"]
-        if body / total_range < 0.3:
-            if upper_wick > 2 * body:
+        if total_range > 0 and current_body / total_range < 0.3:
+            if upper_wick > 2 * current_body:
                 patterns["bearish_pin"] = True
-            elif lower_wick > 2 * body:
+            elif lower_wick > 2 * current_body:
                 patterns["bullish_pin"] = True
         
-        if body / total_range < 0.05:
+        # Doji
+        if current_body / total_range < 0.05:
             patterns["doji"] = True
         
-        prices = [c["high"] for c in candles[-7:]]
-        if prices[2] < prices[3] > prices[4] and prices[0] < prices[3] and prices[5] < prices[3]:
-            patterns["head_and_shoulders"] = True
+        # Inside Bar
+        if prev_prev and current["high"] <= previous["high"] and current["low"] >= previous["low"]:
+            patterns["inside_bar"] = True
         
         if patterns:
             logger.debug(f"Price action patterns for {symbol}: {patterns}")
@@ -505,124 +508,116 @@ class TradingBot:
         return ("buy" if prediction[1] > prediction[0] else "sell", confidence)
 
     def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float] | None:
+        # Use current_price in the function logic
+        logger.debug(f"Generating signal for {symbol} at current price: {current_price}")
         if len(self.price_history[symbol]) < MIN_PRICE_POINTS or len(self.candle_history[symbol]) < MIN_PRICE_POINTS:
-            logger.warning(f"Skipping signal for {symbol}: insufficient data (price: {len(self.price_history[symbol])}, candles: {len(self.candle_history[symbol])})")
+        logger.warning(f"Skipping signal for {symbol}: insufficient data (price: {len(self.price_history[symbol])}, candles: {len(self.candle_history[symbol])})")
+        return None
+
+    indicators = self.calculate_indicators(symbol)
+    patterns = self.detect_price_action_patterns(symbol)
+
+    if not indicators or not indicators["price"]:
+        logger.warning(f"No indicators available for {symbol}")
+        return None
+    
+    vwap = indicators.get("vwap")
+    rsi = indicators.get("rsi")
+    macd = indicators.get("macd")
+    macd_signal = indicators.get("macd_signal")
+    ema_fast = indicators.get("ema_fast")
+    ema_slow = indicators.get("ema_slow")
+    bb_upper = indicators.get("bb_upper")
+    bb_lower = indicators.get("bb_lower")
+    price = indicators["price"]
+    
+    ml_signal = self.predict_ml_signal(symbol, indicators)
+    confidence = 0.0
+    signal = None
+    
+    # Volatility check
+    if len(self.price_history[symbol]) >= 2:
+        price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
+        if price_change < VOLATILITY_THRESHOLD:
+            logger.debug(f"Low volatility for {symbol}: {price_change:.4f}")
             return None
-        
-        indicators = self.calculate_indicators(symbol)
-        patterns = self.detect_price_action_patterns(symbol)
-        if not indicators or not indicators["price"]:
-            logger.warning(f"No indicators available for {symbol}")
-            return None
-        
-        vwap = indicators.get("vwap")
-        rsi = indicators.get("rsi")
-        macd = indicators.get("macd")
-        macd_signal = indicators.get("macd_signal")
-        ema_fast = indicators.get("ema_fast")
-        ema_slow = indicators.get("ema_slow")
-        bb_upper = indicators.get("bb_upper")
-        bb_lower = indicators.get("bb_lower")
-        price = indicators["price"]
-        
-        ml_signal = self.predict_ml_signal(symbol, indicators)
-        confidence = 0.0
-        signal = None
-        
-        if len(self.price_history[symbol]) >= 2:
-            price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
-            if price_change < VOLATILITY_THRESHOLD:
-                logger.debug(f"Low volatility for {symbol}: {price_change:.4f}")
-                return None
-        else:
-            logger.debug(f"Insufficient price history for volatility check: {len(self.price_history[symbol])} points")
-            return None
-        
-        if patterns:
-            if patterns.get("bullish_engulfing") or patterns.get("bullish_pin"):
+    else:
+        logger.debug(f"Insufficient price history for volatility check: {len(self.price_history[symbol])} points")
+    if patterns:
+        if patterns.get("bullish_engulfing") or patterns.get("bullish_pin") or (patterns.get("inside_bar") and price > self.price_history[symbol][-2]):
+            signal = "buy"
+            confidence += 0.4  # Increased weight for patterns
+        elif patterns.get("bearish_engulfing") or patterns.get("bearish_pin") or (patterns.get("inside_bar") and price < self.price_history[symbol][-2]):
+            signal = "sell"
+            confidence += 0.4
+        elif patterns.get("doji") and vwap is not None:
+            if price > vwap:
                 signal = "buy"
                 confidence += 0.3
-            elif patterns.get("bearish_engulfing") or patterns.get("bearish_pin") or patterns.get("head_and_shoulders"):
+            else:
                 signal = "sell"
                 confidence += 0.3
-            elif patterns.get("doji") and vwap is not None:
-                if price > vwap:
-                    signal = "buy"
-                    confidence += 0.2
-                else:
-                    signal = "sell"
-                    confidence += 0.2
-        
-        if vwap is not None:
-            if price > vwap:
-                if signal == "buy":
-                    confidence += 0.4
-                elif not signal:
-                    signal = "buy"
-                    confidence += 0.4
-            elif price < vwap:
-                if signal == "sell":
-                    confidence += 0.4
-                elif not signal:
-                    signal = "sell"
-                    confidence += 0.4
-            elif abs(price - vwap) / vwap < 0.005:
-                if price > self.price_history[symbol][-2]:
-                    if signal == "buy":
-                        confidence += 0.3
-                    elif not signal:
-                        signal = "buy"
-                        confidence += 0.3
-                else:
-                    if signal == "sell":
-                        confidence += 0.3
-                    elif not signal:
-                        signal = "sell"
-                        confidence += 0.3
-        
-        if len(self.candle_history[symbol]) >= RSI_PERIOD:
-            if macd is not None and macd_signal is not None and ema_fast is not None and ema_slow is not None:
-                if macd > macd_signal and ema_fast > ema_slow:
-                    if signal == "buy":
-                        confidence += 0.2
-                    elif not signal:
-                        signal = "buy"
-                        confidence += 0.2
-                elif macd < macd_signal and ema_fast < ema_slow:
-                    if signal == "sell":
-                        confidence += 0.2
-                    elif not signal:
-                        signal = "sell"
-                        confidence += 0.2
-            
-            if rsi is not None and bb_upper is not None and bb_lower is not None:
-                if rsi < RSI_OVERSOLD and price <= bb_lower:
-                    if signal == "buy":
-                        confidence += 0.2
-                    elif not signal:
-                        signal = "buy"
-                        confidence += 0.2
-                elif rsi > RSI_OVERBOUGHT and price >= bb_upper:
-                    if signal == "sell":
-                        confidence += 0.2
-                    elif not signal:
-                        signal = "sell"
-                        confidence += 0.2
-        
-        if ml_signal:
-            ml_side, ml_confidence = ml_signal
-            if signal and signal == ml_side:
-                confidence += ml_confidence * 0.2
+                confidence += 0.3
+    
+    # VWAP
+    if vwap is not None:
+        if price > vwap:
+            if signal == "buy":
+                confidence += 0.3
             elif not signal:
-                signal = ml_side
-                confidence += ml_confidence * 0.2
+                signal = "buy"
+                confidence += 0.3
+        elif price < vwap:
+            if signal == "sell":
+                confidence += 0.3
+            elif not signal:
+                signal = "sell"
+                confidence += 0.3
+    
+    # Indicators
+    if len(self.candle_history[symbol]) >= RSI_PERIOD:
+        if macd is not None and macd_signal is not None and ema_fast is not None and ema_slow is not None:
+            if macd > macd_signal and ema_fast > ema_slow:
+                if signal == "buy":
+                    confidence += 0.2
+                elif not signal:
+                    signal = "buy"
+                    confidence += 0.2
+            elif macd < macd_signal and ema_fast < ema_slow:
+                if signal == "sell":
+                    confidence += 0.2
+                elif not signal:
+                    signal = "sell"
+                    confidence += 0.2
         
-        if not signal or confidence < 0.5:
-            logger.debug(f"No valid signal for {symbol}: confidence {confidence:.2f}")
-            return None
-        
-        logger.info(f"Generated signal for {symbol}: {signal} with confidence {confidence:.2f}")
-        return signal, confidence
+        if rsi is not None and bb_upper is not None and bb_lower is not None:
+            if rsi < RSI_OVERSOLD and price <= bb_lower:
+                if signal == "buy":
+                    confidence += 0.2
+                elif not signal:
+                    signal = "buy"
+                    confidence += 0.2
+            elif rsi > RSI_OVERBOUGHT and price >= bb_upper:
+                if signal == "sell":
+                    confidence += 0.2
+                elif not signal:
+                    signal = "sell"
+                    confidence += 0.2
+    
+    # ML Signal
+    if ml_signal:
+        ml_side, ml_confidence = ml_signal
+        if signal and signal == ml_side:
+            confidence += ml_confidence * 0.2
+        elif not signal:
+            signal = ml_side
+            confidence += ml_confidence * 0.2
+    
+    if not signal or confidence < 0.5:
+        logger.debug(f"No valid signal for {symbol}: confidence {confidence:.2f}")
+        return None
+    logger.info(f"Generated signal for {symbol}: {signal} with confidence {confidence:.2f}")
+    return signal, confidence
 
     def place_order(self, symbol: str, price: float, size_usd: float, side: str, max_retries: int = 3) -> str | None:
         logger.info(f"Attempting to place {side} order for {symbol}: ${size_usd:.2f} at ${price}")
