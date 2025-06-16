@@ -134,11 +134,12 @@ class TradingBot:
     def save_candles(self, symbol: str):
         try:
             conn = sqlite3.connect(DB_PATH)
-            os.chmod(DB_PATH, 0o666) if os.path.exists(DB_PATH) else None
-            df = pd.DataFrame(self.candle_history[symbol])
+            if os.path.exists(DB_PATH):
+                os.chmod(DB_PATH, 0o666)
+            df = pd.DataFrame(self.candle_history.get(symbol, []))
             if not df.empty:
                 table_name = symbol.replace("-", "_") + "_candles"
-                df.to_sql(table_name, conn, if_exists='replace', index=False)
+                df.to_sql(table_name, conn, if_exists='append', index=False)
                 logger.debug(f"Saved {len(df)} candles for {symbol} to {DB_PATH} (table: {table_name})")
             else:
                 logger.warning(f"No candles to save for {symbol}")
@@ -147,6 +148,7 @@ class TradingBot:
             logger.error(f"Failed to save candles for {symbol}: {e}")
         except Exception as e:
             logger.error(f"Unexpected error saving candles for {symbol}: {e}")
+        logger.error(f"Unexpected error saving candles for {symbol}: {e}")
 
     def load_candles(self, symbol: str):
         try:
