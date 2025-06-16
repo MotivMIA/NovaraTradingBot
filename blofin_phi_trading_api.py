@@ -84,7 +84,6 @@ load_dotenv()
 DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
 BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
 WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public" if DEMO_MODE else "wss://openapi.blofin.com/ws/public"
-SYMBOLS = []  # Dynamically populated
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.01))
 SIZE_PRECISION = 8
 RSI_PERIOD = 14
@@ -115,7 +114,7 @@ CORRELATION_THRESHOLD = 0.7
 COST_AVERAGE_DIP = 0.02
 COST_AVERAGE_LIMIT = 2
 TRAILING_STOP_MULTIPLIER = 1.5
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Add to .env for Discord/Slack
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -134,21 +133,22 @@ LOCAL_TZ = pytz.timezone("America/Los_Angeles")
 
 class TradingBot:
     def __init__(self):
-        self.candle_history = {}
-        self.price_history = {}
-        self.volume_history = {}
-        self.last_candle_fetch = {}
+        self.symbols = ["BTC-USDT", "ETH-USDT", "XRP-USDT"]  # Initial default
+        self.candle_history = {symbol: [] for symbol in self.symbols}
+        self.price_history = {symbol: [] for symbol in self.symbols}
+        self.volume_history = {symbol: [] for symbol in self.symbols}
+        self.last_candle_fetch = {symbol: {tf: 0 for tf in TIMEFRAMES} for symbol in self.symbols}
         self.account_balance = None
         self.initial_balance = None
         self.ml_model = LogisticRegression()
         self.rf_model = RandomForestClassifier(n_estimators=50, random_state=42)
         self.ensemble_model = None
         self.scaler = StandardScaler()
-        self.is_model_trained = {}
-        self.last_model_train = {}
-        self.leverage_info = {}
-        self.open_orders = {}
-        self.sentiment_cache = {}
+        self.is_model_trained = {symbol: False for symbol in self.symbols}
+        self.last_model_train = {symbol: 0 for symbol in self.symbols}
+        self.leverage_info = {symbol: None for symbol in self.symbols}
+        self.open_orders = {symbol: {} for symbol in self.symbols}
+        self.sentiment_cache = {symbol: {"score": 0.0, "timestamp": 0} for symbol in self.symbols}
         try:
             nltk.download('vader_lexicon', quiet=True)
             self.sid = SentimentIntensityAnalyzer()
@@ -182,7 +182,8 @@ class TradingBot:
                     leverage REAL,
                     profit_loss REAL,
                     features_used TEXT,
-                    timeframes TEXT
+                    timeframes TEXT,
+                    side TEXT
                 )
             """)
             conn.commit()
@@ -227,9 +228,9 @@ class TradingBot:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO trades (symbol, entry_time, exit_time, entry_price, exit_price, size, leverage, profit_loss, features_used, timeframes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (symbol, entry_time, exit_time, entry_price, exit_price, size, leverage, profit_loss, json.dumps(features_used), json.dumps(timeframes)))
+                INSERT INTO trades (symbol, entry_time, exit_time, entry_price, exit_price, size, leverage, profit_loss, features_used, timeframes, side)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (symbol, entry_time, exit_time, entry_price, exit_price, size, leverage, profit_loss, json.dumps(features_used), json.dumps(timeframes), side))
             conn.commit()
             conn.close()
             logger.info(f"Logged trade for {symbol}: P/L ${profit_loss:.2f}")
@@ -323,11 +324,11 @@ class TradingBot:
             return ["BTC-USDT", "ETH-USDT", "XRP-USDT"]
 
     def calculate_portfolio_allocation(self) -> dict:
-        allocations = {symbol: RISK_PER_TRADE / len(SYMBOLS) for symbol in SYMBOLS}
+        allocations = {symbol: RISK_PER_TRADE / len(self.symbols) for symbol in self.symbols}
         try:
             correlations = {}
-            for i, symbol1 in enumerate(SYMBOLS):
-                for symbol2 in SYMBOLS[i+1:]:
+            for i, symbol1 in enumerate(self.symbols):
+                for symbol2 in self.symbols[i+1:]:
                     df1 = pd.DataFrame(self.candle_history.get(symbol1, []))["close"]
                     df2 = pd.DataFrame(self.candle_history.get(symbol2, []))["close"]
                     if len(df1) > 14 and len(df2) > 14:
@@ -335,9 +336,9 @@ class TradingBot:
                         if corr > CORRELATION_THRESHOLD:
                             correlations[(symbol1, symbol2)] = corr
             
-            atrs = {symbol: self.calculate_atr(symbol) for symbol in SYMBOLS}
+            atrs = {symbol: self.calculate_atr(symbol) for symbol in self.symbols}
             total_inverse_atr = sum(1 / atr if atr > 0 else 1 for atr in atrs.values())
-            for symbol in SYMBOLS:
+            for symbol in self.symbols:
                 atr = atrs[symbol] if atrs[symbol] > 0 else 1
                 allocations[symbol] = (1 / atr / total_inverse_atr) * RISK_PER_TRADE
             
@@ -1064,7 +1065,7 @@ class TradingBot:
             return
         
         allocations = self.calculate_portfolio_allocation()
-        risk_amount = self.account_balance * allocations.get(symbol, RISK_PER_TRADE / len(SYMBOLS))
+        risk_amount = self.account_balance * allocations.get(symbol, RISK_PER_TRADE / len(self.symbols))
         logger.debug(f"Dynamic risk for {symbol}: ${risk_amount:.2f}")
         
         order_id = self.place_order(symbol, price, risk_amount, side, confidence, patterns, price_change)
@@ -1079,7 +1080,7 @@ class TradingBot:
             try:
                 async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
                     logger.info("WebSocket connected")
-                    for symbol in SYMBOLS:
+                    for symbol in self.symbols:
                         await ws.send(json.dumps({
                             "op": "subscribe",
                             "args": [{"channel": "tickers", "instId": symbol}]
@@ -1093,19 +1094,18 @@ class TradingBot:
                                 self.save_candles(symbol)
                                 logger.info(f"Fetched {len(candles)} initial {tf} candles for {symbol}")
                     
-                    last_order_time = {symbol: 0 for symbol in SYMBOLS}
+                    last_order_time = {symbol: 0 for symbol in self.symbols}
                     last_symbol_update = 0
                     order_interval = 60
-                    last_price = {symbol: None for symbol in SYMBOLS}
+                    last_price = {symbol: None for symbol in self.symbols}
                     price_change_threshold = VOLATILITY_THRESHOLD
                     
                     while True:
                         try:
                             if time.time() - last_symbol_update > 3600:
-                                global SYMBOLS
                                 new_symbols = self.select_top_symbols()
                                 for symbol in new_symbols:
-                                    if symbol not in SYMBOLS:
+                                    if symbol not in self.symbols:
                                         self.candle_history[symbol] = []
                                         self.price_history[symbol] = []
                                         self.volume_history[symbol] = []
@@ -1119,7 +1119,7 @@ class TradingBot:
                                             "op": "subscribe",
                                             "args": [{"channel": "tickers", "instId": symbol}]
                                         }))
-                                SYMBOLS = new_symbols
+                                self.symbols = new_symbols
                                 last_symbol_update = time.time()
                             
                             data = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
@@ -1203,9 +1203,8 @@ class TradingBot:
                 sys.exit(1)
 
         self.initialize_db()
-        global SYMBOLS
-        SYMBOLS = self.select_top_symbols()
-        for symbol in SYMBOLS:
+        self.symbols = self.select_top_symbols()
+        for symbol in self.symbols:
             self.candle_history[symbol] = []
             self.price_history[symbol] = []
             self.volume_history[symbol] = []
@@ -1226,7 +1225,7 @@ class TradingBot:
             self.account_balance = DEFAULT_BALANCE
         self.initial_balance = self.account_balance
         
-        for symbol in SYMBOLS:
+        for symbol in self.symbols:
             price_volume = self.get_price(symbol)
             if not price_volume:
                 logger.error(f"Failed to get initial price for {symbol}")
