@@ -15,6 +15,7 @@ import sqlite3
 import glob
 import sys
 import argparse
+import nltk
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
@@ -23,7 +24,12 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import BollingerBands
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import VotingClassifier
 from sklearn.preprocessing import StandardScaler
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # Custom formatter for microseconds
 class MicrosecondFormatter(logging.Formatter):
@@ -78,7 +84,7 @@ load_dotenv()
 DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
 BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
 WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public" if DEMO_MODE else "wss://openapi.blofin.com/ws/public"
-SYMBOLS = os.getenv("SYMBOLS", "BTC-USDT,ETH-USDT,XRP-USDT").split(",")
+SYMBOLS = []  # Dynamically populated
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.01))
 SIZE_PRECISION = 8
 RSI_PERIOD = 14
@@ -101,7 +107,14 @@ CANDLE_TIMEFRAME = "1m"
 CANDLE_FETCH_INTERVAL = 60
 CANDLE_LIMIT = 1000
 DB_PATH = os.path.join("/opt/render/project/src/db", "market_data.db") if os.getenv("RENDER") else os.path.join(os.path.dirname(__file__), "market_data.db")
-MAX_LEVERAGE = 10.0  # Global cap, overridden for high-confidence signals
+MAX_LEVERAGE = 10.0
+TIMEFRAMES = ["1m", "5m", "15m", "1h", "1d"]
+SENTIMENT_WEIGHT = 0.1
+MAX_SYMBOLS = 10
+CORRELATION_THRESHOLD = 0.7
+COST_AVERAGE_DIP = 0.02  # 2% dip for cost averaging
+COST_AVERAGE_LIMIT = 2  # Max 2 additional entries
+TRAILING_STOP_MULTIPLIER = 1.5  # Trailing stop at 1.5x ATR
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -120,17 +133,51 @@ LOCAL_TZ = pytz.timezone("America/Los_Angeles")
 
 class TradingBot:
     def __init__(self):
-        self.candle_history = {symbol: [] for symbol in SYMBOLS}
-        self.price_history = {symbol: [] for symbol in SYMBOLS}
-        self.volume_history = {symbol: [] for symbol in SYMBOLS}
-        self.last_candle_fetch = {symbol: 0 for symbol in SYMBOLS}
+        self.candle_history = {}
+        self.price_history = {}
+        self.volume_history = {}
+        self.last_candle_fetch = {}
         self.account_balance = None
         self.initial_balance = None
         self.ml_model = LogisticRegression()
+        self.rf_model = RandomForestClassifier(n_estimators=50, random_state=42)
+        self.ensemble_model = None
         self.scaler = StandardScaler()
-        self.is_model_trained = {symbol: False for symbol in SYMBOLS}
-        self.last_model_train = {symbol: 0 for symbol in SYMBOLS}
-        self.leverage_info = {symbol: None for symbol in SYMBOLS}
+        self.is_model_trained = {}
+        self.last_model_train = {}
+        self.leverage_info = {}
+        self.open_orders = {}  # symbol: {order_id: {details}}
+        self.sentiment_cache = {}
+        try:
+            nltk.download('vader_lexicon', quiet=True)
+            self.sid = SentimentIntensityAnalyzer()
+            logger.info("NLTK vader_lexicon initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize NLTK vader_lexicon: {e}")
+            self.sid = None
+
+    def initialize_db(self):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    symbol TEXT,
+                    entry_time INTEGER,
+                    exit_time INTEGER,
+                    entry_price REAL,
+                    exit_price REAL,
+                    size REAL,
+                    leverage REAL,
+                    profit_loss REAL,
+                    features_used TEXT
+                )
+            """)
+            conn.commit()
+            conn.close()
+            logger.info("Initialized trades table in database")
+        except sqlite3.Error as e:
+            logger.error(f"Failed to initialize database: {e}")
 
     def save_candles(self, symbol: str):
         try:
@@ -161,6 +208,73 @@ class TradingBot:
             logger.debug(f"No stored candles found for {symbol} or database error: {e}")
         except Exception as e:
             logger.error(f"Unexpected error loading candles for {symbol}: {e}")
+
+    def log_trade(self, symbol: str, entry_time: int, exit_time: int, entry_price: float, exit_price: float, size: float, leverage: float, features_used: dict):
+        try:
+            profit_loss = (exit_price - entry_price) * size if side == "buy" else (entry_price - exit_price) * size
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO trades (symbol, entry_time, exit_time, entry_price, exit_price, size, leverage, profit_loss, features_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (symbol, entry_time, exit_time, entry_price, exit_price, size, leverage, profit_loss, json.dumps(features_used)))
+            conn.commit()
+            conn.close()
+            logger.info(f"Logged trade for {symbol}: P/L ${profit_loss:.2f}")
+        except sqlite3.Error as e:
+            logger.error(f"Failed to log trade for {symbol}: {e}")
+
+    def analyze_performance(self):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            df = pd.read_sql("SELECT * FROM trades", conn)
+            conn.close()
+            if df.empty:
+                logger.info("No trades to analyze")
+                return
+            
+            win_rate = len(df[df["profit_loss"] > 0]) / len(df)
+            avg_pl = df["profit_loss"].mean()
+            sharpe_ratio = df["profit_loss"].mean() / df["profit_loss"].std() * np.sqrt(252) if df["profit_loss"].std() != 0 else 0
+            feature_impact = {}
+            for feature in ["atr", "sentiment", "multi_timeframe"]:
+                if feature in df["features_used"].iloc[0]:
+                    feature_impact[feature] = df[df["features_used"].str.contains(feature)]["profit_loss"].mean()
+            
+            report = {
+                "win_rate": win_rate,
+                "avg_profit_loss": avg_pl,
+                "sharpe_ratio": sharpe_ratio,
+                "feature_impact": feature_impact
+            }
+            logger.info(f"Performance report: {json.dumps(report, indent=2)}")
+            return report
+        except Exception as e:
+            logger.error(f"Failed to analyze performance: {e}")
+            return None
+
+    def generate_performance_plots(self):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            df = pd.read_sql("SELECT * FROM trades", conn)
+            conn.close()
+            if df.empty:
+                logger.info("No trades to plot")
+                return
+            
+            fig = make_subplots(rows=3, cols=1, subplot_titles=("Profit/Loss Over Time", "Win/Loss Distribution", "Leverage vs. Return"))
+            
+            fig.add_trace(go.Scatter(x=df["exit_time"], y=df["profit_loss"].cumsum(), mode="lines", name="Cumulative P/L"), row=1, col=1)
+            fig.add_trace(go.Histogram(x=df["profit_loss"], name="P/L Distribution"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df["leverage"], y=df["profit_loss"], mode="markers", name="Leverage vs. P/L"), row=3, col=1)
+            
+            plot_dir = os.path.join(os.path.dirname(__file__), "plots")
+            os.makedirs(plot_dir, exist_ok=True)
+            plot_file = os.path.join(plot_dir, f"performance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
+            fig.write_html(plot_file)
+            logger.info(f"Generated performance plot: {plot_file}")
+        except Exception as e:
+            logger.error(f"Failed to generate performance plots: {e}")
 
     def sign_request(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> tuple[dict, str, str]:
         local_time = datetime.now(LOCAL_TZ)
@@ -208,7 +322,7 @@ class TradingBot:
     def validate_credentials(self) -> bool:
         path = "/api/v1/market/tickers"
         try:
-            response = requests.get(f"{BASE_URL}{path}?instId={SYMBOLS[0]}", timeout=5)
+            response = requests.get(f"{BASE_URL}{path}?instId=BTC-USDT", timeout=5)
             response.raise_for_status()
             data = response.json()
             if data.get("code") == "0":
@@ -220,21 +334,82 @@ class TradingBot:
             logger.error(f"Credential validation error: {e}")
             return False
 
-    def get_candles(self, symbol: str, limit: int = CANDLE_LIMIT) -> list | None:
+    def select_top_symbols(self) -> list:
+        path = "/api/v1/market/tickers"
+        try:
+            response = requests.get(f"{BASE_URL}{path}", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") != "0" or not data.get("data"):
+                logger.error(f"Failed to fetch tickers: {data}")
+                return []
+            
+            df = pd.DataFrame(data["data"])
+            df["vol24h"] = df["vol24h"].astype(float)
+            df["price_change"] = (df["last"].astype(float) - df["open24h"].astype(float)) / df["open24h"].astype(float)
+            df["atr"] = 0.0
+            for symbol in df["instId"]:
+                candles = self.get_candles(symbol, limit=50)
+                if candles:
+                    df_candles = pd.DataFrame(candles)
+                    df_candles["tr"] = df_candles[["high", "low", "close"]].apply(
+                        lambda x: max(x["high"] - x["low"], abs(x["high"] - x["close"].shift(1)), abs(x["low"] - x["close"].shift(1))), axis=1
+                    )
+                    df.loc[df["instId"] == symbol, "atr"] = df_candles["tr"].rolling(window=14).mean().iloc[-1]
+            
+            df["score"] = 0.5 * df["price_change"] + 0.3 * df["vol24h"] / df["vol24h"].max() - 0.2 * df["atr"] / df["atr"].max()
+            top_symbols = df[df["vol24h"] > 1_000_000]["instId"].nlargest(MAX_SYMBOLS).tolist()
+            logger.info(f"Selected top symbols: {top_symbols}")
+            return top_symbols
+        except Exception as e:
+            logger.error(f"Failed to select top symbols: {e}")
+            return ["BTC-USDT", "ETH-USDT", "XRP-USDT"]
+
+    def calculate_portfolio_allocation(self) -> dict:
+        allocations = {symbol: RISK_PER_TRADE / len(SYMBOLS) for symbol in SYMBOLS}
+        try:
+            correlations = {}
+            for i, symbol1 in enumerate(SYMBOLS):
+                for symbol2 in SYMBOLS[i+1:]:
+                    df1 = pd.DataFrame(self.candle_history.get(symbol1, []))["close"]
+                    df2 = pd.DataFrame(self.candle_history.get(symbol2, []))["close"]
+                    if len(df1) > 14 and len(df2) > 14:
+                        corr = df1.tail(14).corr(df2.tail(14))
+                        if corr > CORRELATION_THRESHOLD:
+                            correlations[(symbol1, symbol2)] = corr
+            
+            atrs = {symbol: self.calculate_atr(symbol) for symbol in SYMBOLS}
+            total_inverse_atr = sum(1 / atr if atr > 0 else 1 for atr in atrs.values())
+            for symbol in SYMBOLS:
+                atr = atrs[symbol] if atrs[symbol] > 0 else 1
+                allocations[symbol] = (1 / atr / total_inverse_atr) * RISK_PER_TRADE
+            
+            for (s1, s2), corr in correlations.items():
+                total_alloc = allocations[s1] + allocations[s2]
+                allocations[s1] = total_alloc * 0.6
+                allocations[s2] = total_alloc * 0.4
+            
+            logger.debug(f"Portfolio allocations: {allocations}")
+            return allocations
+        except Exception as e:
+            logger.error(f"Failed to calculate portfolio allocations: {e}")
+            return allocations
+
+    def get_candles(self, symbol: str, limit: int = CANDLE_LIMIT, timeframe: str = "1m") -> list | None:
         current_time = time.time()
-        if current_time - self.last_candle_fetch[symbol] < CANDLE_FETCH_INTERVAL:
-            logger.debug(f"Skipping candle fetch for {symbol}: within {CANDLE_FETCH_INTERVAL}s interval")
+        if current_time - self.last_candle_fetch.get(symbol, {}).get(timeframe, 0) < CANDLE_FETCH_INTERVAL:
+            logger.debug(f"Skipping candle fetch for {symbol} ({timeframe}): within {CANDLE_FETCH_INTERVAL}s interval")
             return None
         path = "/api/v1/market/candles"
-        params = {"instId": symbol, "bar": CANDLE_TIMEFRAME, "limit": str(limit)}
+        params = {"instId": symbol, "bar": timeframe, "limit": str(limit)}
         for attempt in range(3):
             try:
                 response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
                 response.raise_for_status()
                 data = response.json()
-                logger.debug(f"Candle response for {symbol}: {json.dumps(data, indent=2)}")
+                logger.debug(f"Candle response for {symbol} ({timeframe}): {json.dumps(data, indent=2)}")
                 if data.get("code") == "0" and data.get("data"):
-                    self.last_candle_fetch[symbol] = current_time
+                    self.last_candle_fetch.setdefault(symbol, {})[timeframe] = current_time
                     candles = [{
                         "timestamp": int(candle[0]),
                         "open": float(candle[1]),
@@ -244,7 +419,7 @@ class TradingBot:
                         "volume": float(candle[5])
                     } for candle in data["data"]]
                     return candles
-                logger.error(f"No candle data for {symbol}")
+                logger.error(f"No candle data for {symbol} ({timeframe})")
                 return None
             except requests.RequestException as e:
                 logger.error(f"Attempt {attempt + 1} failed: {e}")
@@ -373,14 +548,14 @@ class TradingBot:
                     return 1.0
         return 1.0
 
-    def calculate_margin(self, symbol: str, size_usd: float, confidence: float, volatility: float, patterns: dict) -> float:
+    def calculate_margin(self, symbol: str, size_usd: float, confidence: float, volatility: float, patterns: dict) -> tuple[float, float]:
         max_leverage = self.leverage_info.get(symbol) or self.get_max_leverage(symbol)
         risk_amount = size_usd
         
         leverage = 1.0
         leverage_percentage = 0.0
         if confidence > 0.7 or patterns.get("bullish_engulfing") or patterns.get("bearish_engulfing") or patterns.get("bullish_pin") or patterns.get("bearish_pin"):
-            leverage_percentage = 0.5 + (confidence - 0.7) * 1.5  # 50% at 0.7, 80% at 0.9
+            leverage_percentage = 0.5 + (confidence - 0.7) * 1.5
             leverage = max_leverage * min(leverage_percentage, 0.8)
         elif confidence > 0.5 or patterns.get("doji") or patterns.get("inside_bar"):
             leverage = min(max_leverage, 3.0)
@@ -396,472 +571,131 @@ class TradingBot:
         logger.debug(f"Calculated margin for {symbol}: ${margin_amount:.2f} at {leverage:.2f}x leverage ({leverage_percentage*100:.1f}% of {max_leverage}x)")
         return margin_amount, leverage
 
-    def detect_price_action_patterns(self, symbol: str) -> dict | None:
+    def calculate_atr(self, symbol: str, period: int = 14) -> float:
         candles = self.candle_history.get(symbol, [])
-        if len(candles) < 3:
-            logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} candles")
-            return None
-        
-        patterns = {}
-        current = candles[-1]
-        previous = candles[-2]
-        prev_prev = candles[-3] if len(candles) >= 3 else None
-        
-        current_body = abs(current["close"] - current["open"])
-        previous_body = abs(previous["close"] - previous["open"])
-        if current_body > previous_body:
-            if (current["close"] > current["open"] and previous["close"] < previous["open"] and
-                    current["open"] <= previous["close"] and current["close"] >= previous["open"]):
-                patterns["bullish_engulfing"] = True
-            elif (current["close"] < current["open"] and previous["close"] > previous["open"] and
-                    current["open"] >= previous["close"] and current["close"] <= previous["open"]):
-                patterns["bearish_engulfing"] = True
-        
-        total_range = current["high"] - current["low"]
-        upper_wick = current["high"] - max(current["open"], current["close"])
-        lower_wick = min(current["open"], current["close"]) - current["low"]
-        if total_range > 0 and current_body / total_range < 0.3:
-            if upper_wick > 2 * current_body:
-                patterns["bearish_pin"] = True
-            elif lower_wick > 2 * current_body:
-                patterns["bullish_pin"] = True
-        
-        if current_body / total_range < 0.05:
-            patterns["doji"] = True
-        
-        if prev_prev and current["high"] <= previous["high"] and current["low"] >= previous["low"]:
-            patterns["inside_bar"] = True
-        
-        if patterns:
-            logger.debug(f"Price action patterns for {symbol}: {patterns}")
-            return patterns
-        return None
+        if len(candles) < period + 1:
+            return 0.0
+        df = pd.DataFrame(candles[-period-1:])
+        df["high_low"] = df["high"] - df["low"]
+        df["high_prev_close"] = abs(df["high"] - df["close"].shift(1))
+        df["low_prev_close"] = abs(df["low"] - df["close"].shift(1))
+        df["tr"] = df[["high_low", "high_prev_close", "low_prev_close"]].max(axis=1)
+        atr = df["tr"].rolling(window=period).mean().iloc[-1]
+        logger.debug(f"ATR for {symbol}: ${atr:.2f}")
+        return atr if not np.isnan(atr) else 0.0
 
-    def calculate_vwap(self, symbol: str) -> float | None:
-        candles = self.candle_history.get(symbol, [])
-        if len(candles) < VWAP_PERIOD:
-            logger.warning(f"Insufficient candle data for VWAP calculation for {symbol}: {len(candles)} candles")
-            return None
-        
-        df = pd.DataFrame(candles[-VWAP_PERIOD:])
-        df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
-        df["pv"] = df["typical_price"] * df["volume"]
-        vwap = df["pv"].sum() / df["volume"].sum()
-        logger.debug(f"VWAP for {symbol}: ${vwap:.2f}")
-        return vwap
-
-    def train_ml_model(self, symbol: str):
+    def get_x_sentiment(self, symbol: str) -> float:
+        if not self.sid:
+            return 0.0
         current_time = time.time()
-        if current_time - self.last_model_train[symbol] < 3600:
-            return
+        if current_time - self.sentiment_cache.get(symbol, {}).get("timestamp", 0) < 300:
+            return self.sentiment_cache[symbol]["score"]
         
-        prices = self.price_history.get(symbol, [])
-        if len(prices) < ML_LOOKBACK + RSI_PERIOD + MACD_SLOW + MACD_SIGNAL:
-            logger.warning(f"Insufficient data for {symbol}: {len(prices)} points")
-            return
-        
-        df = pd.DataFrame(prices, columns=["price"])
-        df["rsi"] = RSIIndicator(df["price"], window=RSI_PERIOD).rsi()
-        macd = MACD(df["price"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
-        df["macd"] = macd.macd()
-        df["macd_signal"] = macd.macd_signal()
-        df["ema_fast"] = EMAIndicator(df["price"], window=EMA_FAST).ema_indicator()
-        df["ema_slow"] = EMAIndicator(df["price"], window=EMA_SLOW).ema_indicator()
-        bb = BollingerBands(df["price"], window=BB_PERIOD, window_dev=BB_STD)
-        df["bb_upper"] = bb.bollinger_hband()
-        df["bb_lower"] = bb.bollinger_lband()
-        
-        df["price_lag1"] = df["price"].shift(1)
-        df["price_lag2"] = df["price"].shift(2)
-        df["target"] = (df["price"].shift(-1) > df["price"]).astype(int)
-        
-        df = df.dropna()
-        if len(df) < 10:
-            logger.warning(f"Insufficient valid data for {symbol}: {len(df)} rows")
-            return
-        
-        features = ["rsi", "macd", "macd_signal", "ema_fast", "ema_slow", "bb_upper", "bb_lower", "price_lag1", "price_lag2"]
-        X = df[features].values
-        y = df["target"].values
-        
-        X_scaled = self.scaler.fit_transform(X)
-        self.ml_model.fit(X_scaled, y)
-        self.is_model_trained[symbol] = True
-        self.last_model_train[symbol] = current_time
-        logger.info(f"ML model trained for {symbol} with {len(df)} data points")
-
-    def calculate_indicators(self, symbol: str) -> dict | None:
-        candles = self.candle_history.get(symbol, [])
-        if len(candles) < MIN_PRICE_POINTS:
-            logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} candles")
-            return {"price": candles[-1]["close"] if candles else None}
-        
-        df = pd.DataFrame(candles)
-        indicators = {"price": df["close"].iloc[-1]}
-        vwap = self.calculate_vwap(symbol)
-        if vwap:
-            indicators["vwap"] = vwap
-        
-        if len(candles) >= RSI_PERIOD:
-            indicators["rsi"] = RSIIndicator(df["close"], window=RSI_PERIOD).rsi().iloc[-1]
-        if len(candles) >= max(MACD_SLOW + MACD_SIGNAL, EMA_SLOW, BB_PERIOD):
-            macd = MACD(df["close"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
-            indicators["macd"] = macd.macd().iloc[-1]
-            indicators["macd_signal"] = macd.macd_signal().iloc[-1]
-            indicators["ema_fast"] = EMAIndicator(df["close"], window=EMA_FAST).ema_indicator().iloc[-1]
-            indicators["ema_slow"] = EMAIndicator(df["close"], window=EMA_SLOW).ema_indicator().iloc[-1]
-            bb = BollingerBands(df["close"], window=BB_PERIOD, window_dev=BB_STD)
-            indicators["bb_upper"] = bb.bollinger_hband().iloc[-1]
-            indicators["bb_lower"] = bb.bollinger_lband().iloc[-1]
-        indicators["price_lag1"] = df["close"].iloc[-2] if len(df) > 1 else np.nan
-        indicators["price_lag2"] = df["close"].iloc[-3] if len(df) > 2 else np.nan
-        
-        logger.debug(f"{symbol} indicators - VWAP: {indicators.get('vwap', 'N/A')}, RSI: {indicators.get('rsi', 'N/A')}")
-        return indicators
-
-    def predict_ml_signal(self, symbol: str, indicators: dict) -> tuple[str, float] | None:
-        if not self.is_model_trained.get(symbol, False):
-            self.train_ml_model(symbol)
-            if not self.is_model_trained[symbol]:
-                return None
-        
-        features = [
-            indicators.get("rsi", 50.0),
-            indicators.get("macd", 0.0),
-            indicators.get("macd_signal", 0.0),
-            indicators.get("ema_fast", indicators["price"]),
-            indicators.get("ema_slow", indicators["price"]),
-            indicators.get("bb_upper", indicators["price"] * 1.02),
-            indicators.get("bb_lower", indicators["price"] * 0.98),
-            indicators.get("price_lag1", indicators["price"]),
-            indicators.get("price_lag2", indicators["price"])
+        mock_posts = [
+            f"{symbol.replace('-USDT', '')} to the moon! 🚀",
+            f"Bearish on {symbol.replace('-USDT', '')} this week.",
+            f"Buying {symbol.replace('-USDT', '')} at dip!"
         ]
-        
-        if any(np.isnan(f) for f in features):
-            logger.warning(f"Invalid features for {symbol}: {features}")
-            return None
-        
-        X = np.array(features).reshape(1, -1)
-        X_scaled = self.scaler.transform(X)
-        prediction = self.ml_model.predict_proba(X_scaled)[0]
-        confidence = max(prediction)
-        
-        if confidence < 0.6:
-            return None
-        
-        return ("buy" if prediction[1] > prediction[0] else "sell", confidence)
+        scores = [self.sid.polarity_scores(post)["compound"] for post in mock_posts]
+        sentiment_score = sum(scores) / len(scores) if scores else 0.0
+        self.sentiment_cache[symbol] = {"score": sentiment_score, "timestamp": current_time}
+        logger.debug(f"X sentiment for {symbol}: {sentiment_score:.2f}")
+        return sentiment_score
 
-    def analyze_indicators_and_patterns(self, symbol):
-        indicators = self.calculate_indicators(symbol)
-        patterns = self.detect_price_action_patterns(symbol)
-        if not indicators or not indicators["price"]:
-            logger.warning(f"No indicators available for {symbol}")
-            return None, None
-        return indicators, patterns
-    
-    def analyze_indicators(self, symbol, indicators):
-        vwap = indicators.get("vwap")
-        rsi = indicators.get("rsi")
-        macd = indicators.get("macd")
-        macd_signal = indicators.get("macd_signal")
-        ema_fast = indicators.get("ema_fast")
-        ema_slow = indicators.get("ema_slow")
-        bb_upper = indicators.get("bb_upper")
-        bb_lower = indicators.get("bb_lower")
-        price = indicators.get("price")
-        
-        confidence = 0.0
-        signal = None
-        return signal, confidence, vwap, rsi, macd, macd_signal, ema_fast, ema_slow, bb_upper, bb_lower, price
-    
-    def check_volatility(self, symbol: str, price: float) -> tuple[bool, float]:
-        volatility = 0.0
-        if len(self.price_history[symbol]) >= 2:
-            volatility = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
-            if volatility < VOLATILITY_THRESHOLD:
-                logger.debug(f"Low volatility for {symbol}: {volatility:.4f}")
-                return False, volatility
-        logger.debug(f"Volatility check passed for {symbol}: {volatility:.4f}")
-        return True, volatility
-
-    def analyze_patterns_and_indicators(self, patterns, symbol, price, vwap, confidence, signal):
-        if patterns:
-            previous_price = self.price_history[symbol][-2] if len(self.price_history[symbol]) >= 2 else price
-            if patterns.get("bullish_engulfing") or patterns.get("bullish_pin") or (patterns.get("inside_bar") and price > previous_price):
-                signal = "buy"
-                confidence += 0.4
-            elif patterns.get("bearish_engulfing") or patterns.get("bearish_pin") or (patterns.get("inside_bar") and price < previous_price):
-                signal = "sell"
-                confidence += 0.4
-            elif patterns.get("doji") and vwap is not None:
-                if price > vwap:
-                    signal = "buy"
-                    confidence += 0.3
-                else:
-                    signal = "sell"
-                    confidence += 0.3
-        return signal, confidence
-    
-    def analyze_vwap(self, vwap, price, signal, confidence):
-        if vwap is not None:
-            if price > vwap:
-                if signal == "buy":
-                    confidence += 0.3
-                elif not signal:
-                    signal = "buy"
-                    confidence += 0.3
-            elif price < vwap:
-                if signal == "sell":
-                    confidence += 0.3
-                elif not signal:
-                    signal = "sell"
-                    confidence += 0.3
-        return signal, confidence
-    
-    def check_indicators(self, symbol: str, macd: float, macd_signal: float, ema_fast: float, ema_slow: float, rsi: float, bb_upper: float, bb_lower: float, price: float, signal: str, confidence: float):
-        if len(self.candle_history[symbol]) >= RSI_PERIOD:
-            if macd is not None and macd_signal is not None and ema_fast is not None and ema_slow is not None:
-                if macd > macd_signal and ema_fast > ema_slow:
-                    if signal == "buy":
-                        confidence += 0.2
-                    elif not signal:
-                        signal = "buy"
-                        confidence += 0.2
-                elif macd < macd_signal and ema_fast < ema_slow:
-                    if signal == "sell":
-                        confidence += 0.2
-                    elif not signal:
-                        signal = "sell"
-                        confidence += 0.2
-            
-            if rsi is not None and bb_upper is not None and bb_lower is not None:
-                if rsi < RSI_OVERSOLD and price <= bb_lower:
-                    if signal == "buy":
-                        confidence += 0.2
-                    elif not signal:
-                        signal = "buy"
-                        confidence += 0.2
-                elif rsi > RSI_OVERBOUGHT and price >= bb_upper:
-                    if signal == "sell":
-                        confidence += 0.2
-                    elif not signal:
-                        signal = "sell"
-                        confidence += 0.2
-        return signal, confidence
-
-    def evaluate_signal(self, symbol, signal, confidence):
-        if not signal or confidence < 0.5:
-            logger.debug(f"No valid signal for {symbol}: confidence {confidence:.2f}")
-            return None
-        logger.info(f"Generated signal for {symbol}: {signal} with confidence {confidence:.2f}")
-        return signal, confidence
-
-    def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float, dict] | None:
-        logger.debug(f"Generating signal for {symbol} at current_price: {current_price}")
-        if len(self.price_history[symbol]) < MIN_PRICE_POINTS or len(self.candle_history[symbol]) < MIN_PRICE_POINTS:
-            logger.warning(f"Skipping signal for {symbol}: insufficient data (price: {len(self.price_history[symbol])}, candles: {len(self.candle_history[symbol])})")
-            return None
-        
-        indicators, patterns = self.analyze_indicators_and_patterns(symbol)
-        if not indicators:
-            return None
-        
-        signal, confidence, vwap, rsi, macd, macd_signal, ema_fast, ema_slow, bb_upper, bb_lower, price = self.analyze_indicators(symbol, indicators)
-        
-        is_volatile, volatility = self.check_volatility(symbol, current_price)
-        if not is_volatile:
-            return None
-        
-        signal, confidence = self.analyze_patterns_and_indicators(patterns, symbol, current_price, vwap, confidence, signal)
-        
-        signal, confidence = self.analyze_vwap(vwap, current_price, signal, confidence)
-        
-        signal, confidence = self.check_indicators(symbol, macd, macd_signal, ema_fast, ema_slow, rsi, bb_upper, bb_lower, current_price, signal, confidence)
-        
-        ml_signal = self.predict_ml_signal(symbol, indicators)
-        if ml_signal:
-            ml_side, ml_confidence = ml_signal
-            if signal == ml_side:
-                confidence += ml_confidence * 0.2
-            elif not signal:
-                signal = ml_side
-                confidence += ml_confidence * 0.2
-        
-        signal_info = self.evaluate_signal(symbol, signal, confidence)
-        if signal_info:
-            return signal_info[0], signal_info[1], patterns or {}
-        return None
-
-    def place_order(self, symbol: str, price: float, size_usd: float, side: str, confidence: float, patterns: dict, volatility: float, max_retries: int = 3) -> str | None:
-        logger.info(f"Attempting to place {side} order for {symbol}: ${size_usd:.2f} at ${price}")
-        path = "/api/v1/trade/order"
-        inst_info = self.get_instrument_info(symbol)
-        if not inst_info:
-            logger.error(f"Failed to get instrument info for {symbol}")
-            return None
-        
-        min_size = inst_info["minSize"]
-        lot_size = inst_info["lotSize"]
-        contract_value = inst_info["contractValue"]
-        
-        margin_amount, leverage = self.calculate_margin(symbol, size_usd, confidence, volatility, patterns)
-        size = (margin_amount / price) / contract_value
-        size = max(round(size / lot_size) * lot_size, min_size)
-        logger.info(f"Calculated order size for {symbol}: {size} contracts at ${price} with {leverage:.2f}x leverage")
-        
-        stop_loss = price * (0.99 if side == "buy" else 1.01)
-        take_profit = price * (1.02 if side == "buy" else 0.98)
-        
-        order_request = {
-            "instId": symbol,
-            "instType": "SWAP",
-            "marginMode": "cross",
-            "leverage": str(leverage),
-            "positionSide": "net",
-            "side": side,
-            "orderType": "limit",
-            "price": str(round(price, SIZE_PRECISION)),
-            "size": str(size)
-        }
-        
-        for attempt in range(max_retries):
-            try:
-                headers, _, _ = self.sign_request("POST", path, body=order_request)
-                response = requests.post(f"{BASE_URL}{path}", headers=headers, json=order_request, timeout=5)
-                response.raise_for_status()
-                data = response.json()
-                logger.debug(f"Order response for {symbol}: {data}")
-                if data.get("code") == "0" and data.get("data"):
-                    order_id = data["data"][0]["orderId"]
-                    logger.info(f"Placed {side} order for {symbol}: {size} contracts at ${price}, SL: ${stop_loss:.2f}, TP: ${take_profit:.2f}, Leverage: {leverage:.2f}x")
-                    return order_id
-                logger.error(f"Order failed for {symbol}: {data}")
-                if data.get("code") == "152406":
-                    logger.error("IP whitelisting issue, retrying...")
-                    time.sleep(2 ** attempt)
-                    continue
-                return None
-            except requests.RequestException as e:
-                logger.error(f"Attempt {attempt + 1} failed for {symbol}: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                else:
-                    logger.error(f"Failed after {max_retries} attempts: {e}")
-                    return None
-        return None
-
-    async def ws_connect(self, max_retries: int = 10):
-        retry_count = 0
-        while retry_count < max_retries:
-            logger.debug(f"WebSocket connection attempt to {WS_URL} at {datetime.now(LOCAL_TZ)}")
-            try:
-                async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
-                    logger.info("WebSocket connected")
-                    for symbol in SYMBOLS:
-                        await ws.send(json.dumps({
-                            "op": "subscribe",
-                            "args": [{"channel": "tickers", "instId": symbol}]
-                        }))
-                        logger.info(f"Subscribed to {symbol} ticker")
-                        self.load_candles(symbol)
-                        candles = self.get_candles(symbol)
-                        if candles:
-                            self.candle_history[symbol] = candles
-                            self.save_candles(symbol)
-                            logger.info(f"Fetched {len(candles)} initial candles for {symbol}")
-                    
-                    last_order_time = {symbol: 0 for symbol in SYMBOLS}
-                    order_interval = 60
-                    last_price = {symbol: None for symbol in SYMBOLS}
-                    price_change_threshold = VOLATILITY_THRESHOLD
-                    
-                    while True:
-                        try:
-                            data = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
-                            logger.info(f"WebSocket data: {json.dumps(data, indent=2)}")
-                            if "data" in data and data["data"]:
-                                symbol = data["arg"]["instId"]
-                                price = float(data["data"][0]["last"])
-                                volume = float(data["data"][0]["lastSize"])
-                                logger.info(f"WebSocket price for {symbol}: ${price}")
-                                self.price_history[symbol].append(price)
-                                self.volume_history[symbol].append(volume)
-                                if len(self.price_history[symbol]) > 100:
-                                    self.price_history[symbol] = self.price_history[symbol][-100:]
-                                    self.volume_history[symbol] = self.volume_history[symbol][-100:]
-                                
-                                candles = self.get_candles(symbol, limit=1)
-                                if candles:
-                                    self.candle_history[symbol].append(candles[0])
-                                    if len(self.candle_history[symbol]) > 100:
-                                        self.candle_history[symbol] = self.candle_history[symbol][-100:]
-                                    self.save_candles(symbol)
-                                
-                                current_time = time.time()
-                                if last_price[symbol] is None:
-                                    last_price[symbol] = price
-                                    continue
-                                
-                                price_change = abs(price - last_price[symbol]) / last_price[symbol]
-                                if current_time - last_order_time[symbol] >= order_interval and price_change >= price_change_threshold:
-                                    signal_info = self.generate_signal(symbol, price)
-                                    if signal_info:
-                                        signal, confidence, patterns = signal_info
-                                        logger.info(f"Signal for {symbol}: {signal} with confidence {confidence:.2f}")
-                                        await self.process_trade(symbol, price, signal, price_change, confidence, patterns)
-                                        last_order_time[symbol] = current_time
-                                        last_price[symbol] = price
-                            await asyncio.sleep(0.2)
-                        except (websockets.exceptions.ConnectionClosed, json.JSONDecodeError, asyncio.TimeoutError) as e:
-                            logger.error(f"WebSocket error: {e}")
-                            break
-            except Exception as e:
-                logger.error(f"WebSocket connection failed: {e}")
-                retry_count += 1
-                if retry_count < max_retries:
-                    logger.info(f"Retrying WebSocket (attempt {retry_count + 1}/{max_retries})")
-                    await asyncio.sleep(2 ** retry_count)
-                else:
-                    logger.error(f"Failed after {max_retries} attempts")
-                    break
-
-    async def process_trade(self, symbol: str, price: float, side: str, price_change: float, confidence: float, patterns: dict):
-        if not self.account_balance:
-            self.account_balance = self.get_account_balance()
-            if not self.account_balance:
-                logger.error("Failed to get account balance")
-                return
-            if not self.initial_balance:
-                self.initial_balance = self.account_balance
-        
-        if self.account_balance < self.initial_balance * (1 - MAX_DRAWDOWN):
-            logger.error(f"Max drawdown reached for {symbol}: {self.account_balance:.2f}/{self.initial_balance:.2f}")
+    def manage_cost_averaging(self, symbol: str, current_price: float):
+        if symbol not in self.open_orders:
             return
         
-        risk_factor = min(2, max(0.5, price_change / VOLATILITY_THRESHOLD))
-        risk_amount = self.account_balance * RISK_PER_TRADE * risk_factor
-        logger.debug(f"Dynamic risk for {symbol}: {risk_factor:.2f}x, amount: ${risk_amount:.2f}")
-        
-        order_id = self.place_order(symbol, price, risk_amount, side, confidence, patterns, price_change)
-        if order_id:
-            logger.info(f"Trade executed for {symbol}: {side} ${risk_amount:.2f} at ${price}")
-            self.account_balance -= risk_amount * 0.01
+        for order_id, order in list(self.open_orders[symbol].items()):
+            if order["confidence"] < 0.7:
+                continue
+            entry_price = order["entry_price"]
+            size = order["size"]
+            count = order.get("cost_average_count", 0)
+            if count >= COST_AVERAGE_LIMIT:
+                continue
+            dip_threshold = entry_price * (1 - COST_AVERAGE_DIP if order["side"] == "buy" else 1 + COST_AVERAGE_DIP)
+            if (order["side"] == "buy" and current_price <= dip_threshold) or (order["side"] == "sell" and current_price >= dip_threshold):
+                new_size = size * 0.5
+                new_leverage = order["leverage"] * 0.5
+                new_order_id = self.place_order(
+                    symbol, current_price, new_size * current_price, order["side"],
+                    order["confidence"], order["patterns"], order["volatility"]
+                )
+                if new_order_id:
+                    self.open_orders[symbol][new_order_id] = {
+                        "entry_price": current_price,
+                        "size": new_size,
+                        "leverage": new_leverage,
+                        "side": order["side"],
+                        "confidence": order["confidence"],
+                        "patterns": order["patterns"],
+                        "volatility": order["volatility"],
+                        "cost_average_count": count + 1,
+                        "entry_time": int(time.time())
+                    }
+                    logger.info(f"Cost-averaged {order['side']} order for {symbol} at ${current_price}")
 
-    async def health_check(self):
-        logger.info("Running health check")
+    def manage_trailing_stop(self, symbol: str, current_price: float):
+        if symbol not in self.open_orders:
+            return
+        
+        atr = self.calculate_atr(symbol)
+        for order_id, order in list(self.open_orders[symbol].items()):
+            if order["side"] == "buy":
+                new_stop = max(order.get("trailing_stop", order["entry_price"] * 0.99), current_price - atr * TRAILING_STOP_MULTIPLIER)
+                if new_stop > order.get("trailing_stop", 0):
+                    order["trailing_stop"] = new_stop
+                    logger.debug(f"Updated trailing stop for {symbol} buy order {order_id} to ${new_stop:.2f}")
+                if current_price <= new_stop:
+                    self.log_trade(
+                        symbol, order["entry_time"], int(time.time()), order["entry_price"],
+                        current_price, order["size"], order["leverage"],
+                        {"atr": atr, "sentiment": self.get_x_sentiment(symbol), "multi_timeframe": True}
+                    )
+                    del self.open_orders[symbol][order_id]
+            else:
+                new_stop = min(order.get("trailing_stop", order["entry_price"] * 1.01), current_price + atr * TRAILING_STOP_MULTIPLIER)
+                if new_stop < order.get("trailing_stop", float("inf")):
+                    order["trailing_stop"] = new_stop
+                    logger.debug(f"Updated trailing stop for {symbol} sell order {order_id} to ${new_stop:.2f}")
+                if current_price >= new_stop:
+                    self.log_trade(
+                        symbol, order["entry_time"], int(time.time()), order["entry_price"],
+                        current_price, order["size"], order["leverage"],
+                        {"atr": atr, "sentiment": self.get_x_sentiment(symbol), "multi_timeframe": True}
+                    )
+                    del self.open_orders[symbol][order_id]
+
+    async def backtest_strategy(self, symbol: str, lookback_days: int = 7):
         try:
-            if not self.validate_credentials():
-                logger.error("Health check failed: Credential validation")
-                return False
-            balance = self.get_account_balance()
-            if balance is None:
-                logger.error("Health check failed: Could not retrieve balance")
-                return False
-            logger.info("Health check passed: API reachable, balance retrieved")
-            return True
+            start_time = int(time.time() - lookback_days * 86400)
+            conn = sqlite3.connect(DB_PATH)
+            table_name = symbol.replace("-", "_") + "_candles"
+            df = pd.read_sql(f"SELECT * FROM {table_name} WHERE timestamp >= {start_time}", conn)
+            conn.close()
+            if df.empty:
+                logger.info(f"No historical data for backtesting {symbol}")
+                return
+            
+            simulated_balance = self.account_balance or DEFAULT_BALANCE
+            for i in range(len(df) - 1):
+                price = df["close"].iloc[i]
+                signal_info = self.generate_signal(symbol, price)
+                if signal_info:
+                    signal, confidence, patterns = signal_info
+                    price_change = abs(price - df["close"].iloc[i-1]) / df["close"].iloc[i-1] if i > 0 else VOLATILITY_THRESHOLD
+                    risk_amount = simulated_balance * RISK_PER_TRADE
+                    margin_amount, leverage = self.calculate_margin(symbol, risk_amount, confidence, price_change, patterns)
+                    size = margin_amount / price
+                    next_price = df["close"].iloc[i+1]
+                    pl = (next_price - price) * size if signal == "buy" else (price - next_price) * size
+                    simulated_balance += pl
+                    logger.debug(f"Backtest trade for {symbol}: {signal} at ${price}, P/L ${pl:.2f}")
+            
+            logger.info(f"Backtest result for {symbol}: Final balance ${simulated_balance:.2f}")
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
-            return False
+            logger.error(f"Backtest failed for {symbol}: {e}")
 
     async def main(self):
         parser = argparse.ArgumentParser()
@@ -876,6 +710,20 @@ class TradingBot:
                 logger.error("Health check failed")
                 sys.exit(1)
 
+        self.initialize_db()
+        global SYMBOLS
+        SYMBOLS = self.select_top_symbols()
+        for symbol in SYMBOLS:
+            self.candle_history[symbol] = []
+            self.price_history[symbol] = []
+            self.volume_history[symbol] = []
+            self.last_candle_fetch[symbol] = {tf: 0 for tf in TIMEFRAMES}
+            self.is_model_trained[symbol] = False
+            self.last_model_train[symbol] = 0
+            self.leverage_info[symbol] = None
+            self.open_orders[symbol] = {}
+            self.sentiment_cache[symbol] = {"score": 0.0, "timestamp": 0}
+        
         if not self.validate_credentials():
             logger.error("Credential validation failed, exiting")
             return
@@ -896,11 +744,13 @@ class TradingBot:
             self.price_history[symbol].append(price)
             self.volume_history[symbol].append(volume)
             self.load_candles(symbol)
-            candles = self.get_candles(symbol)
-            if candles:
-                self.candle_history[symbol] = candles
-                self.save_candles(symbol)
-                logger.info(f"Fetched {len(candles)} initial candles for {symbol}")
+            for tf in TIMEFRAMES:
+                candles = self.get_candles(symbol, timeframe=tf)
+                if candles:
+                    self.candle_history[symbol] = candles
+                    self.save_candles(symbol)
+                    logger.info(f"Fetched {len(candles)} initial {tf} candles for {symbol}")
+            await self.backtest_strategy(symbol)
             signal_info = self.generate_signal(symbol, price)
             if signal_info:
                 signal, confidence, patterns = signal_info
