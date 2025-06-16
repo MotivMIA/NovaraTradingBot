@@ -94,13 +94,14 @@ BB_STD = 2
 ML_LOOKBACK = 50
 MAX_DRAWDOWN = 0.10
 DEFAULT_BALANCE = 10000.0
-MIN_PRICE_POINTS = 1  # Reduced to enable signals
+MIN_PRICE_POINTS = 1
 VWAP_PERIOD = 20
-VOLATILITY_THRESHOLD = 0.01  # Reduced to enable signals
+VOLATILITY_THRESHOLD = 0.01
 CANDLE_TIMEFRAME = "1m"
 CANDLE_FETCH_INTERVAL = 60
 CANDLE_LIMIT = 1000
 DB_PATH = os.path.join("/opt/render/project/src/db", "market_data.db") if os.getenv("RENDER") else os.path.join(os.path.dirname(__file__), "market_data.db")
+MAX_LEVERAGE = 10.0  # Global cap, overridden for high-confidence signals
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -129,6 +130,7 @@ class TradingBot:
         self.scaler = StandardScaler()
         self.is_model_trained = {symbol: False for symbol in SYMBOLS}
         self.last_model_train = {symbol: 0 for symbol in SYMBOLS}
+        self.leverage_info = {symbol: None for symbol in SYMBOLS}
 
     def save_candles(self, symbol: str):
         try:
@@ -345,6 +347,55 @@ class TradingBot:
         logger.warning(f"Using default balance: ${DEFAULT_BALANCE:.2f} USDT")
         return DEFAULT_BALANCE
 
+    def get_max_leverage(self, symbol: str) -> float | None:
+        path = "/api/v1/account/leverage-info"
+        params = {"instId": symbol, "marginMode": "cross"}
+        headers, _, _ = self.sign_request("GET", path, params=params)
+        for attempt in range(3):
+            try:
+                response = requests.get(f"{BASE_URL}{path}", headers=headers, params=params, timeout=5)
+                response.raise_for_status()
+                data = response.json()
+                logger.debug(f"Leverage info for {symbol}: {json.dumps(data, indent=2)}")
+                if data.get("code") == "0" and data.get("data"):
+                    max_leverage = float(data["data"][0].get("maxLeverage", 1.0))
+                    self.leverage_info[symbol] = max_leverage
+                    logger.info(f"Max leverage for {symbol}: {max_leverage}x")
+                    return max_leverage
+                logger.error(f"No leverage info for {symbol}")
+                return 1.0
+            except requests.RequestException as e:
+                logger.error(f"Attempt {attempt + 1} failed: {e}")
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Failed after {attempt + 1} attempts: {e}")
+                    return 1.0
+        return 1.0
+
+    def calculate_margin(self, symbol: str, size_usd: float, confidence: float, volatility: float, patterns: dict) -> float:
+        max_leverage = self.leverage_info.get(symbol) or self.get_max_leverage(symbol)
+        risk_amount = size_usd
+        
+        leverage = 1.0
+        leverage_percentage = 0.0
+        if confidence > 0.7 or patterns.get("bullish_engulfing") or patterns.get("bearish_engulfing") or patterns.get("bullish_pin") or patterns.get("bearish_pin"):
+            leverage_percentage = 0.5 + (confidence - 0.7) * 1.5  # 50% at 0.7, 80% at 0.9
+            leverage = max_leverage * min(leverage_percentage, 0.8)
+        elif confidence > 0.5 or patterns.get("doji") or patterns.get("inside_bar"):
+            leverage = min(max_leverage, 3.0)
+            leverage_percentage = leverage / max_leverage if max_leverage > 0 else 1.0
+        if volatility > 2 * VOLATILITY_THRESHOLD:
+            leverage = min(leverage, 2.0)
+            leverage_percentage = leverage / max_leverage if max_leverage > 0 else 1.0
+        
+        if confidence <= 0.7:
+            leverage = min(leverage, MAX_LEVERAGE)
+        
+        margin_amount = risk_amount * leverage * 0.8
+        logger.debug(f"Calculated margin for {symbol}: ${margin_amount:.2f} at {leverage:.2f}x leverage ({leverage_percentage*100:.1f}% of {max_leverage}x)")
+        return margin_amount, leverage
+
     def detect_price_action_patterns(self, symbol: str) -> dict | None:
         candles = self.candle_history.get(symbol, [])
         if len(candles) < 3:
@@ -523,14 +574,15 @@ class TradingBot:
         signal = None
         return signal, confidence, vwap, rsi, macd, macd_signal, ema_fast, ema_slow, bb_upper, bb_lower, price
     
-    def check_volatility(self, symbol: str, price: float) -> bool:
+    def check_volatility(self, symbol: str, price: float) -> tuple[bool, float]:
+        volatility = 0.0
         if len(self.price_history[symbol]) >= 2:
-            price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
-            if price_change < VOLATILITY_THRESHOLD:
-                logger.debug(f"Low volatility for {symbol}: {price_change:.4f}")
-                return False
-        logger.debug(f"Volatility check passed for {symbol}")
-        return True
+            volatility = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
+            if volatility < VOLATILITY_THRESHOLD:
+                logger.debug(f"Low volatility for {symbol}: {volatility:.4f}")
+                return False, volatility
+        logger.debug(f"Volatility check passed for {symbol}: {volatility:.4f}")
+        return True, volatility
 
     def analyze_patterns_and_indicators(self, patterns, symbol, price, vwap, confidence, signal):
         if patterns:
@@ -604,8 +656,8 @@ class TradingBot:
         logger.info(f"Generated signal for {symbol}: {signal} with confidence {confidence:.2f}")
         return signal, confidence
 
-    def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float] | None:
-        logger.debug(f"Generating signal for {symbol} at current price: {current_price}")
+    def generate_signal(self, symbol: str, current_price: float) -> tuple[str, float, dict] | None:
+        logger.debug(f"Generating signal for {symbol} at current_price: {current_price}")
         if len(self.price_history[symbol]) < MIN_PRICE_POINTS or len(self.candle_history[symbol]) < MIN_PRICE_POINTS:
             logger.warning(f"Skipping signal for {symbol}: insufficient data (price: {len(self.price_history[symbol])}, candles: {len(self.candle_history[symbol])})")
             return None
@@ -616,7 +668,8 @@ class TradingBot:
         
         signal, confidence, vwap, rsi, macd, macd_signal, ema_fast, ema_slow, bb_upper, bb_lower, price = self.analyze_indicators(symbol, indicators)
         
-        if not self.check_volatility(symbol, current_price):
+        is_volatile, volatility = self.check_volatility(symbol, current_price)
+        if not is_volatile:
             return None
         
         signal, confidence = self.analyze_patterns_and_indicators(patterns, symbol, current_price, vwap, confidence, signal)
@@ -634,9 +687,12 @@ class TradingBot:
                 signal = ml_side
                 confidence += ml_confidence * 0.2
         
-        return self.evaluate_signal(symbol, signal, confidence)
+        signal_info = self.evaluate_signal(symbol, signal, confidence)
+        if signal_info:
+            return signal_info[0], signal_info[1], patterns or {}
+        return None
 
-    def place_order(self, symbol: str, price: float, size_usd: float, side: str, max_retries: int = 3) -> str | None:
+    def place_order(self, symbol: str, price: float, size_usd: float, side: str, confidence: float, patterns: dict, volatility: float, max_retries: int = 3) -> str | None:
         logger.info(f"Attempting to place {side} order for {symbol}: ${size_usd:.2f} at ${price}")
         path = "/api/v1/trade/order"
         inst_info = self.get_instrument_info(symbol)
@@ -648,9 +704,10 @@ class TradingBot:
         lot_size = inst_info["lotSize"]
         contract_value = inst_info["contractValue"]
         
-        size = (size_usd / price) / contract_value
+        margin_amount, leverage = self.calculate_margin(symbol, size_usd, confidence, volatility, patterns)
+        size = (margin_amount / price) / contract_value
         size = max(round(size / lot_size) * lot_size, min_size)
-        logger.info(f"Calculated order size for {symbol}: {size} contracts at ${price}")
+        logger.info(f"Calculated order size for {symbol}: {size} contracts at ${price} with {leverage:.2f}x leverage")
         
         stop_loss = price * (0.99 if side == "buy" else 1.01)
         take_profit = price * (1.02 if side == "buy" else 0.98)
@@ -659,6 +716,7 @@ class TradingBot:
             "instId": symbol,
             "instType": "SWAP",
             "marginMode": "cross",
+            "leverage": str(leverage),
             "positionSide": "net",
             "side": side,
             "orderType": "limit",
@@ -675,7 +733,7 @@ class TradingBot:
                 logger.debug(f"Order response for {symbol}: {data}")
                 if data.get("code") == "0" and data.get("data"):
                     order_id = data["data"][0]["orderId"]
-                    logger.info(f"Placed {side} order for {symbol}: {size} contracts at ${price}, SL: ${stop_loss:.2f}, TP: ${take_profit:.2f}")
+                    logger.info(f"Placed {side} order for {symbol}: {size} contracts at ${price}, SL: ${stop_loss:.2f}, TP: ${take_profit:.2f}, Leverage: {leverage:.2f}x")
                     return order_id
                 logger.error(f"Order failed for {symbol}: {data}")
                 if data.get("code") == "152406":
@@ -748,9 +806,9 @@ class TradingBot:
                                 if current_time - last_order_time[symbol] >= order_interval and price_change >= price_change_threshold:
                                     signal_info = self.generate_signal(symbol, price)
                                     if signal_info:
-                                        signal, confidence = signal_info
+                                        signal, confidence, patterns = signal_info
                                         logger.info(f"Signal for {symbol}: {signal} with confidence {confidence:.2f}")
-                                        await self.process_trade(symbol, price, signal, price_change)
+                                        await self.process_trade(symbol, price, signal, price_change, confidence, patterns)
                                         last_order_time[symbol] = current_time
                                         last_price[symbol] = price
                             await asyncio.sleep(0.2)
@@ -767,7 +825,7 @@ class TradingBot:
                     logger.error(f"Failed after {max_retries} attempts")
                     break
 
-    async def process_trade(self, symbol: str, price: float, side: str, price_change: float):
+    async def process_trade(self, symbol: str, price: float, side: str, price_change: float, confidence: float, patterns: dict):
         if not self.account_balance:
             self.account_balance = self.get_account_balance()
             if not self.account_balance:
@@ -784,7 +842,7 @@ class TradingBot:
         risk_amount = self.account_balance * RISK_PER_TRADE * risk_factor
         logger.debug(f"Dynamic risk for {symbol}: {risk_factor:.2f}x, amount: ${risk_amount:.2f}")
         
-        order_id = self.place_order(symbol, price, risk_amount, side)
+        order_id = self.place_order(symbol, price, risk_amount, side, confidence, patterns, price_change)
         if order_id:
             logger.info(f"Trade executed for {symbol}: {side} ${risk_amount:.2f} at ${price}")
             self.account_balance -= risk_amount * 0.01
@@ -845,10 +903,10 @@ class TradingBot:
                 logger.info(f"Fetched {len(candles)} initial candles for {symbol}")
             signal_info = self.generate_signal(symbol, price)
             if signal_info:
-                signal, confidence = signal_info
+                signal, confidence, patterns = signal_info
                 price_change = abs(price - self.price_history[symbol][-2]) / self.price_history[symbol][-2] if len(self.price_history[symbol]) >= 2 else VOLATILITY_THRESHOLD
                 logger.info(f"Initial signal for {symbol}: {signal} with confidence {confidence:.2f}")
-                await self.process_trade(symbol, price, signal, price_change)
+                await self.process_trade(symbol, price, signal, price_change, confidence, patterns)
         
         await self.ws_connect()
 
