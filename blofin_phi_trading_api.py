@@ -157,6 +157,22 @@ class TradingBot:
             logger.error(f"Failed to initialize NLTK vader_lexicon: {e}")
             self.sid = None
 
+    def validate_credentials(self) -> bool:
+        """Verify API connectivity using a public endpoint."""
+        path = "/api/v1/market/tickers"
+        try:
+            response = requests.get(f"{BASE_URL}{path}?instId=BTC-USDT", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == "0":
+                logger.info("Public API request successful, credentials likely valid")
+                return True
+            logger.error(f"Credential validation failed: {data}")
+            return False
+        except requests.RequestException as e:
+            logger.error(f"Credential validation error: {e}")
+            return False
+
     def send_webhook_alert(self, message: str):
         if not WEBHOOK_URL:
             return
