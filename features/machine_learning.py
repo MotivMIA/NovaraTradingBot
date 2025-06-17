@@ -6,6 +6,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import VotingClassifier
 from sklearn.preprocessing import StandardScaler
 from logging import getLogger
+from features.indicators import Indicators
+from features.sentiment_analysis import SentimentAnalysis
 
 logger = getLogger(__name__)
 
@@ -16,20 +18,20 @@ class MachineLearning:
         self.ensemble_model = None
         self.scaler = StandardScaler()
 
-    def train_ml_model(self, symbol: str, price_history: dict, volume_history: dict, candle_history: dict, indicators: Indicators, sentiment: SentimentAnalysis, is_model_trained: dict, last_model_train: dict, timeframes: list):
+    def train_ml_model(self, symbol: str, bot):
         current_time = time.time()
-        if current_time - last_model_train.get(symbol, 0) < 300:
+        if current_time - bot.last_model_train.get(symbol, 0) < 300:
             return
         
-        prices = price_history.get(symbol, [])
-        volumes = volume_history.get(symbol, [])
+        prices = bot.price_history.get(symbol, [])
+        volumes = bot.volume_history.get(symbol, [])
         if len(prices) < ML_LOOKBACK + RSI_PERIOD + MACD_SLOW + MACD_SIGNAL:
             logger.warning(f"Insufficient data for {symbol}: {len(prices)} points")
             return
         
         df = pd.DataFrame({"price": prices, "volume": volumes})
-        for tf in timeframes:
-            tf_indicators = indicators.calculate_indicators(symbol, candle_history, indicators.get_candles_func, timeframe=tf)
+        for tf in TIMEFRAMES:
+            tf_indicators = bot.indicators.calculate_indicators(symbol, bot.candle_history, bot.api_utils.get_candles, timeframe=tf)
             if tf_indicators:
                 df[f"rsi_{tf}"] = tf_indicators.get("rsi", 50.0)
                 df[f"macd_{tf}"] = tf_indicators.get("macd", 0.0)
@@ -37,11 +39,11 @@ class MachineLearning:
                 df[f"bb_upper_{tf}"] = tf_indicators.get("bb_upper", df["price"].iloc[-1] * 1.02)
                 df[f"bb_lower_{tf}"] = tf_indicators.get("bb_lower", df["price"].iloc[-1] * 0.98)
         
-        df["atr"] = pd.DataFrame(candle_history[symbol])[["high", "low", "close"]].apply(
+        df["atr"] = pd.DataFrame(bot.candle_history[symbol])[["high", "low", "close"]].apply(
             lambda x: max(x["high"] - x["low"], abs(x["high"] - x["close"].shift(1)), abs(x["low"] - x["close"].shift(1))), axis=1
         ).rolling(window=14).mean()
         df["volume_change"] = df["volume"].pct_change()
-        df["sentiment"] = sentiment.get_x_sentiment(symbol)
+        df["sentiment"] = bot.sentiment.get_x_sentiment(symbol, bot.sentiment_cache)
         df["price_lag1"] = df["price"].shift(1)
         df["price_lag2"] = df["price"].shift(2)
         df["target"] = (df["price"].shift(-1) > df["price"]).astype(int)
@@ -52,15 +54,15 @@ class MachineLearning:
             return
         
         features = [
-            f"rsi_{tf}" for tf in timeframes
+            f"rsi_{tf}" for tf in TIMEFRAMES
         ] + [
-            f"macd_{tf}" for tf in timeframes
+            f"macd_{tf}" for tf in TIMEFRAMES
         ] + [
-            f"macd_signal_{tf}" for tf in timeframes
+            f"macd_signal_{tf}" for tf in TIMEFRAMES
         ] + [
-            f"bb_upper_{tf}" for tf in timeframes
+            f"bb_upper_{tf}" for tf in TIMEFRAMES
         ] + [
-            f"bb_lower_{tf}" for tf in timeframes
+            f"bb_lower_{tf}" for tf in TIMEFRAMES
         ] + [
             "atr", "volume_change", "sentiment", "price_lag1", "price_lag2"
         ]
@@ -74,19 +76,19 @@ class MachineLearning:
             estimators=[('lr', self.ml_model), ('rf', self.rf_model)], voting='soft'
         )
         self.ensemble_model.fit(X_scaled, y)
-        is_model_trained[symbol] = True
-        last_model_train[symbol] = current_time
+        bot.is_model_trained[symbol] = True
+        bot.last_model_train[symbol] = current_time
         logger.info(f"ML ensemble trained for {symbol} with {len(df)} data points")
 
-    def predict_ml_signal(self, symbol: str, indicators: dict, indicators_module: Indicators, candle_history: dict, timeframes: list) -> tuple | None:
-        if not is_model_trained.get(symbol, False):
-            self.train_ml_model(symbol, price_history, volume_history, candle_history, indicators_module, sentiment, is_model_trained, last_model_train, timeframes)
-            if not is_model_trained[symbol]:
+    def predict_ml_signal(self, symbol: str, indicators: dict, bot) -> tuple[str, float] | None:
+        if not bot.is_model_trained.get(symbol, False):
+            self.train_ml_model(symbol, bot)
+            if not bot.is_model_trained[symbol]:
                 return None
         
         features = []
-        for tf in timeframes:
-            tf_indicators = indicators_module.calculate_indicators(symbol, candle_history, indicators_module.get_candles_func, timeframe=tf)
+        for tf in TIMEFRAMES:
+            tf_indicators = bot.indicators.calculate_indicators(symbol, bot.candle_history, bot.api_utils.get_candles, timeframe=tf)
             features.extend([
                 tf_indicators.get("rsi", 50.0),
                 tf_indicators.get("macd", 0.0),
@@ -95,9 +97,9 @@ class MachineLearning:
                 tf_indicators.get("bb_lower", indicators["price"] * 0.98)
             ])
         features.extend([
-            indicators_module.calculate_atr(symbol, candle_history),
+            bot.indicators.calculate_atr(symbol, bot.candle_history),
             indicators.get("volume_change", 0.0),
-            sentiment.get_x_sentiment(symbol),
+            bot.sentiment.get_x_sentiment(symbol, bot.sentiment_cache),
             indicators.get("price_lag1", indicators["price"]),
             indicators.get("price_lag2", indicators["price"])
         ])
