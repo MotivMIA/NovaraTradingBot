@@ -18,7 +18,7 @@ class APIUtils:
         self.api_key = api_key
         self.api_secret = api_secret
         self.api_passphrase = api_passphrase
-        self.last_candle_fetch = {}  # Initialize last_candle_fetch
+        self.last_candle_fetch = {}
 
     def validate_credentials(self) -> bool:
         path = "/api/v1/market/tickers"
@@ -175,38 +175,45 @@ class APIUtils:
 
     def get_candles(self, symbol: str, limit: int = CANDLE_LIMIT, timeframe: str = "1m") -> list | None:
         current_time = time.time()
-        if current_time - self.last_candle_fetch.get(symbol, {}).get(timeframe, 0) < CANDLE_FETCH_INTERVAL:
+        # Initialize last_candle_fetch for symbol/timeframe if not present
+        self.last_candle_fetch.setdefault(symbol, {})
+        if timeframe not in self.last_candle_fetch[symbol]:
+            self.last_candle_fetch[symbol][timeframe] = 0
+        # Force fetch if no prior fetch or cache is outdated
+        if self.last_candle_fetch[symbol][timeframe] == 0 or (current_time - self.last_candle_fetch[symbol][timeframe] >= CANDLE_FETCH_INTERVAL):
+            path = "/api/v1/market/candles"
+            params = {"instId": symbol, "bar": timeframe, "limit": str(limit)}
+            for attempt in range(3):
+                try:
+                    response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
+                    response.raise_for_status()
+                    data = response.json()
+                    logger.debug(f"Candle response for {symbol} ({timeframe}): {json.dumps(data, indent=2)}")
+                    if data.get("code") == "0" and data.get("data"):
+                        self.last_candle_fetch[symbol][timeframe] = current_time
+                        candles = [{
+                            "timestamp": int(candle[0]),
+                            "open": float(candle[1]),
+                            "high": float(candle[2]),
+                            "low": float(candle[3]),
+                            "close": float(candle[4]),
+                            "volume": float(candle[5])
+                        } for candle in data["data"]]
+                        logger.info(f"Fetched {len(candles)} candles for {symbol} ({timeframe})")
+                        return candles
+                    logger.error(f"No candle data for {symbol} ({timeframe})")
+                    return None
+                except requests.RequestException as e:
+                    logger.error(f"Attempt {attempt + 1} failed: {e}")
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"Failed after {attempt + 1} attempts: {e}")
+                        return None
+            return None
+        else:
             logger.debug(f"Skipping candle fetch for {symbol} ({timeframe}): within {CANDLE_FETCH_INTERVAL}s interval")
             return None
-        path = "/api/v1/market/candles"
-        params = {"instId": symbol, "bar": timeframe, "limit": str(limit)}
-        for attempt in range(3):
-            try:
-                response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
-                response.raise_for_status()
-                data = response.json()
-                logger.debug(f"Candle response for {symbol} ({timeframe}): {json.dumps(data, indent=2)}")
-                if data.get("code") == "0" and data.get("data"):
-                    self.last_candle_fetch.setdefault(symbol, {})[timeframe] = current_time
-                    candles = [{
-                        "timestamp": int(candle[0]),
-                        "open": float(candle[1]),
-                        "high": float(candle[2]),
-                        "low": float(candle[3]),
-                        "close": float(candle[4]),
-                        "volume": float(candle[5])
-                    } for candle in data["data"]]
-                    return candles
-                logger.error(f"No candle data for {symbol} ({timeframe})")
-                return None
-            except requests.RequestException as e:
-                logger.error(f"Attempt {attempt + 1} failed: {e}")
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-                else:
-                    logger.error(f"Failed after {attempt + 1} attempts: {e}")
-                    return None
-        return None
 
     def get_price(self, symbol: str) -> tuple[float, float] | None:
         path = "/api/v1/market/tickers"

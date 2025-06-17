@@ -21,7 +21,7 @@ class PortfolioManagement:
             df["volume"] = df["vol24h"].astype(float)
             df["volatility"] = (df["high24h"].astype(float) - df["low24h"].astype(float)) / df["open24h"].astype(float)
             df = df[df["instId"].str.endswith("-USDT")]
-            df = df[df["volume"] > df["volume"].quantile(0.5)]
+            df = df[df["volume"] > df["volume"].quantile(0.75)]
             df = df[df["volatility"] > df["volatility"].quantile(0.5)]
             
             top_symbols = df.sort_values(by="volume", ascending=False)["instId"].head(MAX_SYMBOLS).tolist()
