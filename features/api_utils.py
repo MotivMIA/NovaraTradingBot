@@ -10,16 +10,23 @@ from datetime import datetime
 from uuid import uuid4
 from logging import getLogger
 from typing import List, Dict, Tuple, Optional
-from features.config import BASE_URL, LOCAL_TZ, CANDLE_LIMIT, CANDLE_FETCH_INTERVAL, DEFAULT_BALANCE
+from features.config import BASE_URL, LOCAL_TZ, CANDLE_LIMIT, CANDLE_FETCH_INTERVAL, DEFAULT_BALANCE, SIZE_PRECISION
+from cryptography.fernet import Fernet
 
 logger = getLogger(__name__)
 
 class APIUtils:
     def __init__(self, api_key: str, api_secret: str, api_passphrase: str):
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.api_passphrase = api_passphrase
+        key = Fernet.generate_key()  # Store securely in production
+        cipher = Fernet(key)
+        self.api_key = cipher.encrypt(api_key.encode()).decode()
+        self.api_secret = cipher.encrypt(api_secret.encode()).decode()
+        self.api_passphrase = cipher.encrypt(api_passphrase.encode()).decode()
+        self.cipher = cipher
         self.last_candle_fetch = {}
+
+    def decrypt(self, encrypted: str) -> str:
+        return self.cipher.decrypt(encrypted.encode()).decode()
 
     def validate_credentials(self) -> bool:
         path = "/api/v1/market/tickers"
@@ -57,23 +64,20 @@ class APIUtils:
         logger.debug(f"Local time: {local_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
         logger.debug(f"UTC time: {utc_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
         logger.debug(f"Timestamp (ms): {timestamp_ms}")
-        logger.debug(f"Signature message: {content}")
         
         sign_token = hmac.new(
-            self.api_secret.encode(),
+            self.decrypt(self.api_secret).encode(),
             content.encode(),
             hashlib.sha256
         ).hexdigest().encode()
         signature = base64.b64encode(sign_token).decode()
         
-        logger.debug(f"Generated signature: {signature}")
-        
         headers = {
-            "access-key": self.api_key.strip(),
+            "access-key": self.decrypt(self.api_key).strip(),
             "access-sign": signature,
             "access-timestamp": timestamp,
             "access-nonce": nonce,
-            "access-passphrase": self.api_passphrase.strip(),
+            "access-passphrase": self.decrypt(self.api_passphrase).strip(),
             "content-type": "application/json"
         }
         return headers, timestamp, nonce
@@ -231,3 +235,25 @@ class APIUtils:
                     logger.error(f"Failed after {attempt + 1} attempts: {e}")
                     return None
         return None
+
+    async def place_order(self, symbol: str, side: str, size: float, price: float) -> Optional[Dict]:
+        path = "/api/v1/trade/order"
+        body = {
+            "instId": symbol,
+            "side": side.lower(),
+            "ordType": "market",
+            "sz": str(round(size, SIZE_PRECISION))
+        }
+        headers, _, _ = self.sign_request("POST", path, body=body)
+        try:
+            response = requests.post(f"{BASE_URL}{path}", headers=headers, json=body, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == "0":
+                logger.info(f"Placed {side} order for {symbol}: {size} at ${price}")
+                return data["data"]
+            logger.error(f"Order placement failed: {data}")
+            return None
+        except requests.RequestException as e:
+            logger.error(f"Order placement error: {e}")
+            return None

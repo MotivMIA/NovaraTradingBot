@@ -1,9 +1,11 @@
 import pandas as pd
 import numpy as np
 import requests
+import sqlite3
 from logging import getLogger
 from typing import List
-from features.config import BASE_URL, MAX_SYMBOLS, CORRELATION_THRESHOLD, RISK_PER_TRADE, MAX_LEVERAGE, DEFAULT_BALANCE, VOLATILITY_THRESHOLD
+from features.config import BASE_URL, MAX_SYMBOLS, CORRELATION_THRESHOLD, RISK_PER_TRADE, MAX_LEVERAGE_PERCENTAGE, DEFAULT_BALANCE, VOLATILITY_THRESHOLD, DB_PATH
+from features.notifications import Notifications
 
 logger = getLogger(__name__)
 
@@ -46,11 +48,11 @@ class PortfolioManagement:
             logger.error(f"Failed to select top symbols: {e}")
             return bot.symbols
 
-    def calculate_correlations(self, symbols: List[str], bot) -> Optional[pd.DataFrame]:
+    def calculate_correlations(self, symbols: List[str], bot) -> pd.DataFrame | None:
         try:
             price_data = {}
             for symbol in symbols:
-                candles = bot.api_utils.get_candles(symbol, limit=100)
+                candles = bot.exchange.get_candles(symbol, limit=100)
                 if candles and len(candles) >= 50:
                     price_data[symbol] = [candle["close"] for candle in candles]
                 else:
@@ -69,23 +71,56 @@ class PortfolioManagement:
 
     def calculate_margin(self, symbol: str, risk_amount: float, confidence: float, price_change: float, patterns: List[str], bot) -> Tuple[float, float]:
         try:
-            max_leverage = bot.api_utils.get_max_leverage(symbol, bot)
-            base_margin = risk_amount / max_leverage
+            max_leverage = bot.exchange.get_max_leverage(symbol, bot)
+            if max_leverage is None:
+                max_leverage = 1.0
+            effective_leverage = max_leverage * MAX_LEVERAGE_PERCENTAGE
+            base_margin = risk_amount / effective_leverage
             confidence_factor = min(confidence, 1.0)
             volatility_factor = min(price_change / VOLATILITY_THRESHOLD, 2.0)
             pattern_factor = 1.0 + (0.1 * len(patterns))
             
             adjusted_margin = base_margin * confidence_factor * volatility_factor * pattern_factor
-            leverage = min(risk_amount / adjusted_margin, max_leverage)
-            if leverage > MAX_LEVERAGE:
-                leverage = MAX_LEVERAGE
-                adjusted_margin = risk_amount / leverage
-            
+            leverage = min(risk_amount / adjusted_margin, effective_leverage)
             logger.debug(f"Margin for {symbol}: ${adjusted_margin:.2f}, Leverage: {leverage:.2f}x")
             return adjusted_margin, leverage
         except Exception as e:
             logger.error(f"Failed to calculate margin for {symbol}: {e}")
             return risk_amount, 1.0
+
+    def calculate_var(self, bot, confidence_level: float = 0.95) -> float:
+        try:
+            returns = []
+            for symbol in bot.symbols:
+                prices = bot.price_history[symbol][-100:]
+                if len(prices) > 1:
+                    returns.extend(np.diff(prices) / prices[:-1])
+            if not returns:
+                logger.debug("No returns data for VaR calculation")
+                return 0.0
+            returns = np.array(returns)
+            var = np.percentile(returns, (1 - confidence_level) * 100) * bot.account_balance
+            logger.debug(f"Portfolio VaR at {confidence_level*100}%: ${var:.2f}")
+            return var
+        except Exception as e:
+            logger.error(f"VaR calculation failed: {e}")
+            return 0.0
+
+    def check_daily_loss(self, bot) -> bool:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            df = pd.read_sql("SELECT profit_loss FROM trades WHERE entry_time >= ?", conn, params=(int(time.time() - 86400),))
+            conn.close()
+            daily_loss = df["profit_loss"].sum()
+            if daily_loss < -bot.account_balance * 0.05:
+                logger.error(f"Daily loss limit exceeded: ${daily_loss:.2f}")
+                bot.notifications.send_webhook_alert(f"Daily loss limit exceeded: ${daily_loss:.2f}")
+                return False
+            logger.debug(f"Daily loss: ${daily_loss:.2f}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to check daily loss: {e}")
+            return True
 
     def monitor_drawdown(self, bot) -> bool:
         try:
@@ -93,8 +128,8 @@ class PortfolioManagement:
             initial_balance = bot.initial_balance or DEFAULT_BALANCE
             drawdown = (initial_balance - current_balance) / initial_balance
             logger.debug(f"Current drawdown: {drawdown:.2%}")
-            if drawdown > bot.config.MAX_DRAWDOWN:
-                logger.error(f"Max drawdown exceeded: {drawdown:.2%} > {bot.config.MAX_DRAWDOWN:.2%}")
+            if drawdown > MAX_DRAWDOWN:
+                logger.error(f"Max drawdown exceeded: {drawdown:.2%} > {MAX_DRAWDOWN:.2%}")
                 bot.notifications.send_webhook_alert(f"Max drawdown exceeded: {drawdown:.2%}")
                 return False
             return True

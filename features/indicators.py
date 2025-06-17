@@ -16,7 +16,7 @@ class Indicators:
             df = pd.DataFrame(candles)
             required_columns = ["close", "high", "low", "volume"]
             if not all(col in df.columns for col in required_columns):
-                logger.error(f"Missing required columns in candle data for {symbol}: {df.columns}")
+                logger.error(f"Missing required columns for {symbol}: {df.columns}")
                 return {}
             if df[required_columns].isna().any().any():
                 logger.error(f"NaN values in candle data for {symbol}")
@@ -29,20 +29,17 @@ class Indicators:
 
             indicators = {}
 
-            # VWAP
             typical_price = (df["high"] + df["low"] + df["close"]) / 3
             window = min(VWAP_PERIOD, len(df))
             vwap = (typical_price * df["volume"]).rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
             indicators["vwap"] = vwap.iloc[-1] if not pd.isna(vwap.iloc[-1]) else df["close"].iloc[-1]
 
-            # RSI
             delta = df["close"].diff()
             gain = delta.where(delta > 0, 0).rolling(window=RSI_PERIOD).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
-            rs = gain / loss if loss.iloc[-1] != 0 else np.inf
+            rs = gain.iloc[-1] / loss.iloc[-1] if loss.iloc[-1] != 0 else np.inf
             indicators["rsi"] = 100 - (100 / (1 + rs)) if not np.isinf(rs) else 50.0
 
-            # MACD
             ema_fast = df["close"].ewm(span=MACD_FAST, adjust=False).mean()
             ema_slow = df["close"].ewm(span=MACD_SLOW, adjust=False).mean()
             macd = ema_fast - ema_slow
@@ -50,17 +47,14 @@ class Indicators:
             indicators["macd"] = macd.iloc[-1]
             indicators["macd_signal"] = signal.iloc[-1]
 
-            # EMA
             indicators["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean().iloc[-1]
             indicators["ema_slow"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean().iloc[-1]
 
-            # Bollinger Bands
             sma = df["close"].rolling(window=BB_PERIOD).mean()
             std = df["close"].rolling(window=BB_PERIOD).std()
             indicators["bb_upper"] = (sma + BB_STD * std).iloc[-1]
             indicators["bb_lower"] = (sma - BB_STD * std).iloc[-1]
 
-            # ATR
             high_low = df["high"] - df["low"]
             high_close = np.abs(df["high"] - df["close"].shift())
             low_close = np.abs(df["low"] - df["close"].shift())

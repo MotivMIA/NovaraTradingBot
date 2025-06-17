@@ -1,6 +1,7 @@
 import pandas as pd
 import sqlite3
 import numpy as np
+import optuna
 from logging import getLogger
 import time
 from features.config import VOLATILITY_THRESHOLD, RISK_PER_TRADE, TRAILING_STOP_MULTIPLIER, COST_AVERAGE_DIP, DEFAULT_BALANCE, DB_PATH
@@ -30,7 +31,7 @@ class Backtesting:
                     risk_amount = simulated_balance * RISK_PER_TRADE
                     margin_amount, leverage = bot.portfolio.calculate_margin(symbol, risk_amount, confidence, price_change, patterns, bot)
                     size = margin_amount / price
-                    atr = bot.indicators.calculate_atr(symbol, bot.candle_history)
+                    atr = bot.indicators.calculate_atr(symbol, bot.candle_history[symbol])
                     stop_loss = price * (0.99 if signal == "buy" else 1.01)
                     open_orders[i] = {
                         "entry_price": price,
@@ -64,5 +65,25 @@ class Backtesting:
                         }
             
             logger.info(f"Backtest result for {symbol}: Final balance ${simulated_balance:.2f}")
+            return {"final_balance": simulated_balance}
         except Exception as e:
             logger.error(f"Backtest failed for {symbol}: {e}")
+            return None
+
+    def optimize_strategy(self, symbol: str, bot):
+        def objective(trial):
+            bot.config.RSI_OVERSOLD = trial.suggest_float("rsi_oversold", 20, 40)
+            bot.config.RSI_OVERBOUGHT = trial.suggest_float("rsi_overbought", 60, 80)
+            bot.config.VOLATILITY_THRESHOLD = trial.suggest_float("volatility_threshold", 0.002, 0.01)
+            result = asyncio.run(self.backtest_strategy(symbol, bot))
+            return result["final_balance"] if result else 0.0
+        
+        try:
+            study = optuna.create_study(direction="maximize")
+            study.optimize(objective, n_trials=50)
+            logger.info(f"Optimized parameters for {symbol}: {study.best_params}")
+            bot.config.RSI_OVERSOLD = study.best_params["rsi_oversold"]
+            bot.config.RSI_OVERBOUGHT = study.best_params["rsi_overbought"]
+            bot.config.VOLATILITY_THRESHOLD = study.best_params["volatility_threshold"]
+        except Exception as e:
+            logger.error(f"Strategy optimization failed for {symbol}: {e}")
