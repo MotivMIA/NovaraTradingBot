@@ -133,7 +133,7 @@ LOCAL_TZ = pytz.timezone("America/Los_Angeles")
 
 class TradingBot:
     def __init__(self):
-        self.symbols = ["BTC-USDT", "ETH-USDT", "XRP-USDT"]  # Initial default
+        self.symbols = ["BTC-USDT", "ETH-USDT", "XRP-USDT"]
         self.candle_history = {symbol: [] for symbol in self.symbols}
         self.price_history = {symbol: [] for symbol in self.symbols}
         self.volume_history = {symbol: [] for symbol in self.symbols}
@@ -156,22 +156,6 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Failed to initialize NLTK vader_lexicon: {e}")
             self.sid = None
-
-    def validate_credentials(self) -> bool:
-        """Verify API connectivity using a public endpoint."""
-        path = "/api/v1/market/tickers"
-        try:
-            response = requests.get(f"{BASE_URL}{path}?instId=BTC-USDT", timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            if data.get("code") == "0":
-                logger.info("Public API request successful, credentials likely valid")
-                return True
-            logger.error(f"Credential validation failed: {data}")
-            return False
-        except requests.RequestException as e:
-            logger.error(f"Credential validation error: {e}")
-            return False
 
     def send_webhook_alert(self, message: str):
         if not WEBHOOK_URL:
@@ -454,6 +438,21 @@ class TradingBot:
                     logger.error(f"Failed after {attempt + 1} attempts: {e}")
                     return None
         return None
+
+    def validate_credentials(self) -> bool:
+        path = "/api/v1/market/tickers"
+        try:
+            response = requests.get(f"{BASE_URL}{path}?instId=BTC-USDT", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == "0":
+                logger.info("Public API request successful, credentials likely valid")
+                return True
+            logger.error(f"Credential validation failed: {data}")
+            return False
+        except requests.RequestException as e:
+            logger.error(f"Credential validation error: {e}")
+            return False
 
     def get_account_balance(self) -> float | None:
         import urllib.request
