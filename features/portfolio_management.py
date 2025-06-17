@@ -3,7 +3,7 @@ import numpy as np
 import requests
 import sqlite3
 from logging import getLogger
-from typing import List
+from typing import List, Tuple
 from features.config import BASE_URL, MAX_SYMBOLS, CORRELATION_THRESHOLD, RISK_PER_TRADE, MAX_LEVERAGE_PERCENTAGE, DEFAULT_BALANCE, VOLATILITY_THRESHOLD, DB_PATH
 from features.notifications import Notifications
 

@@ -7,6 +7,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import VotingClassifier
 from sklearn.preprocessing import StandardScaler
+from typing import Tuple
 from logging import getLogger
 from features.indicators import Indicators
 from features.sentiment_analysis import SentimentAnalysis

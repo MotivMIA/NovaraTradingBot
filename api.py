@@ -139,6 +139,7 @@ class TradingBot:
                     last_order_time = {symbol: 0 for symbol in self.symbols}
                     last_symbol_update = 0
                     order_interval = 60
+                    last_price = {symbol: None for symbol in self.symbols}
                     
                     def handle_market_data(message):
                         symbol = message["symbol"]
@@ -161,15 +162,19 @@ class TradingBot:
                         self.trading_logic.manage_trailing_stop(symbol, price, self)
                         
                         current_time = time.time()
-                        if current_time - last_order_time[symbol] >= order_interval:
+                        if last_price[symbol] is None:
+                            last_price[symbol] = price
+                            return
+                        
+                        price_change = abs(price - last_price[symbol]) / last_price[symbol] if last_price[symbol] > 0 else 0.0
+                        if current_time - last_order_time[symbol] >= order_interval and price_change >= VOLATILITY_THRESHOLD:
                             signal_info = self.trading_logic.generate_signal(symbol, price, self)
                             if signal_info:
                                 signal, confidence, patterns, timeframes = signal_info
-                                price_change = self.trading_logic.check_volatility(symbol, price, self.price_history)[1]
-                                if price_change >= VOLATILITY_THRESHOLD:
-                                    logger.info(f"Signal for {symbol}: {signal} with confidence {confidence:.2f}")
-                                    asyncio.create_task(self.trading_logic.process_trade(symbol, price, signal, price_change, confidence, patterns, timeframes, self))
-                                    last_order_time[symbol] = current_time
+                                logger.info(f"Signal for {symbol}: {signal} with confidence {confidence:.2f}")
+                                asyncio.create_task(self.trading_logic.process_trade(symbol, price, signal, price_change, confidence, patterns, timeframes, self))
+                                last_order_time[symbol] = current_time
+                                last_price[symbol] = price
                     
                     self.event_bus.subscribe("market_data", handle_market_data)
                     
