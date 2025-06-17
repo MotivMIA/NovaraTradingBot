@@ -5,6 +5,7 @@ from logging import getLogger
 from features.indicators import Indicators
 from features.machine_learning import MachineLearning
 from features.sentiment_analysis import SentimentAnalysis
+from features.config import *
 
 logger = getLogger(__name__)
 
@@ -208,8 +209,8 @@ class TradingLogic:
                 logger.debug(f"Order response for {symbol}: {data}")
                 if data.get("code") == "0" and data.get("data"):
                     order_id = data["data"][0]["orderId"]
-                    logger.info(f"Placed {side} order for {symbol}: {size} contracts at ${price}, SL: ${stop_loss:.2f}, TP: ${take_profit:.2f}, Leverage: {leverage:.2f}x")
-                    bot.notifications.send_webhook_alert(f"Placed {side} order for {symbol}: ${size_usd:.2f} at ${price}, Leverage: {leverage:.2f}x")
+                    logger.info(f"Placed {side} order for {symbol}: {size} contracts at ${price}, SL: ${stop_loss:.2f}, TP: ${take_profit:.2f}, Leverage: ${leverage:.2f}x")
+                    bot.notifications.send_webhook_alert(f"Placed {side} order for {symbol}: ${size_usd:.2f} at ${price}, Leverage: ${leverage:.2f}x")
                     bot.open_orders.setdefault(symbol, {})[order_id] = {
                         "entry_price": price,
                         "size": size,

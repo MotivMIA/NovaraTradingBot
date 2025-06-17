@@ -1,6 +1,7 @@
 # ML model training and prediction
 import pandas as pd
 import numpy as np
+import time
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import VotingClassifier
@@ -8,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 from logging import getLogger
 from features.indicators import Indicators
 from features.sentiment_analysis import SentimentAnalysis
+from features.config import ML_LOOKBACK, RSI_PERIOD, MACD_SLOW, MACD_SIGNAL, TIMEFRAMES
 
 logger = getLogger(__name__)
 

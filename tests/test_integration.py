@@ -13,6 +13,7 @@ def mock_bot():
                 {"timestamp": 2, "open": 105, "high": 115, "low": 95, "close": 110, "volume": 1200}
             ]}
             self.price_history = {"BTC-USDT": [100, 105]}
+            self.volume_history = {"BTC-USDT": [1000, 1200]}  # Added volume_history
             self.indicators = Indicators()
             self.trading_logic = TradingLogic()
             self.ml = MachineLearning()

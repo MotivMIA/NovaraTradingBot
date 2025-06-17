@@ -9,6 +9,7 @@ import urllib.request
 from datetime import datetime
 from uuid import uuid4
 from logging import getLogger
+from features.config import CANDLE_LIMIT, CANDLE_FETCH_INTERVAL
 
 logger = getLogger(__name__)
 

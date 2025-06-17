@@ -5,6 +5,7 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import BollingerBands
 from logging import getLogger
+from features.config import VWAP_PERIOD, RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, EMA_FAST, EMA_SLOW, BB_PERIOD, BB_STD, MIN_PRICE_POINTS
 
 logger = getLogger(__name__)
 
@@ -34,7 +35,7 @@ class Indicators:
         return atr if not np.isnan(atr) else 0.0
 
     def calculate_indicators(self, symbol: str, candle_history: dict, get_candles_func, timeframe: str = "1m") -> dict | None:
-        candles = get_candles_func(symbol, limit=CANDLE_LIMIT, timeframe=timeframe) or candle_history.get(symbol, [])
+        candles = get_candles_func(symbol, timeframe=timeframe) or candle_history.get(symbol, [])
         if len(candles) < MIN_PRICE_POINTS:
             logger.warning(f"Insufficient candle data for {symbol} ({timeframe}): {len(candles)} candles")
             return {"price": candles[-1]["close"] if candles else None}
