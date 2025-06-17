@@ -600,6 +600,17 @@ class TradingBot:
         logger.debug(f"ATR for {symbol}: ${atr:.2f}")
         return atr if not np.isnan(atr) else 0.0
 
+    def calculate_vwap(self, symbol: str) -> float | None:
+        candles = self.candle_history.get(symbol, [])
+        if len(candles) < VWAP_PERIOD:
+            logger.debug(f"Insufficient candles for VWAP calculation for {symbol}: {len(candles)} < {VWAP_PERIOD}")
+            return None
+        df = pd.DataFrame(candles[-VWAP_PERIOD:])
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3
+        vwap = (typical_price * df["volume"]).sum() / df["volume"].sum()
+        logger.debug(f"VWAP for {symbol}: ${vwap:.2f}")
+        return vwap if not np.isnan(vwap) else None
+
     def get_x_sentiment(self, symbol: str) -> float:
         if not self.sid:
             return 0.0
