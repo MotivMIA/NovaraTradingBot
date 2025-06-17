@@ -1,93 +1,119 @@
-# Dynamic symbol selection, portfolio allocation
 import pandas as pd
+import numpy as np
 import requests
 from logging import getLogger
-from features.config import MAX_SYMBOLS, CORRELATION_THRESHOLD, RISK_PER_TRADE, MAX_LEVERAGE
+from features.config import BASE_URL, MAX_SYMBOLS, CORRELATION_THRESHOLD, RISK_PER_TRADE, MAX_LEVERAGE, DEFAULT_BALANCE, VOLATILITY_THRESHOLD
 
 logger = getLogger(__name__)
 
 class PortfolioManagement:
-    def select_top_symbols(self, bot) -> list:
-        path = "/api/v1/market/tickers"
+    def select_top_symbols(self, bot) -> list[str]:
         try:
+            path = "/api/v1/market/tickers"
             response = requests.get(f"{BASE_URL}{path}", timeout=5)
             response.raise_for_status()
             data = response.json()
             if data.get("code") != "0" or not data.get("data"):
-                logger.error(f"Failed to fetch tickers: {data}")
-                return ["BTC-USDT", "ETH-USDT", "XRP-USDT"]
+                logger.error(f"Failed to fetch market tickers: {data}")
+                return bot.symbols
             
             df = pd.DataFrame(data["data"])
-            df["vol24h"] = df["vol24h"].astype(float)
-            df["price_change"] = (df["last"].astype(float) - df["open24h"].astype(float)) / df["open24h"].astype(float)
-            df["atr"] = 0.0
-            for symbol in df["instId"]:
-                candles = bot.api_utils.get_candles(symbol, limit=50)
-                if candles:
-                    df_candles = pd.DataFrame(candles)
-                    df_candles["tr"] = df_candles[["high", "low", "close"]].apply(
-                        lambda x: max(x["high"] - x["low"], abs(x["high"] - x["close"].shift(1)), abs(x["low"] - x["close"].shift(1))), axis=1
-                    )
-                    df.loc[df["instId"] == symbol, "atr"] = df_candles["tr"].rolling(window=14).mean().iloc[-1]
+            df["volume"] = df["vol24h"].astype(float)
+            df["volatility"] = (df["high24h"].astype(float) - df["low24h"].astype(float)) / df["open24h"].astype(float)
+            df = df[df["instId"].str.endswith("-USDT")]
+            df = df[df["volume"] > df["volume"].quantile(0.5)]
+            df = df[df["volatility"] > df["volatility"].quantile(0.5)]
             
-            df["score"] = 0.5 * df["price_change"] + 0.3 * df["vol24h"] / df["vol24h"].max() - 0.2 * df["atr"] / df["atr"].max()
-            top_symbols = df[df["vol24h"] > 1_000_000]["instId"].nlargest(MAX_SYMBOLS).tolist()
-            logger.info(f"Selected top symbols: {top_symbols}")
-            bot.notifications.send_webhook_alert(f"Updated top symbols: {top_symbols}")
-            return top_symbols
+            top_symbols = df.sort_values(by="volume", ascending=False)["instId"].head(MAX_SYMBOLS).tolist()
+            correlation_matrix = self.calculate_correlations(top_symbols, bot)
+            if correlation_matrix is None:
+                return top_symbols
+            
+            selected = []
+            for symbol in top_symbols:
+                if len(selected) >= MAX_SYMBOLS:
+                    break
+                if all(correlation_matrix.loc[symbol, s] < CORRELATION_THRESHOLD for s in selected):
+                    selected.append(symbol)
+            
+            logger.info(f"Selected top symbols: {selected}")
+            return selected or bot.symbols
         except Exception as e:
             logger.error(f"Failed to select top symbols: {e}")
-            return ["BTC-USDT", "ETH-USDT", "XRP-USDT"]
+            return bot.symbols
 
-    def calculate_portfolio_allocation(self, bot) -> dict:
-        allocations = {symbol: RISK_PER_TRADE / len(bot.symbols) for symbol in bot.symbols}
+    def calculate_correlations(self, symbols: list[str], bot) -> pd.DataFrame | None:
         try:
-            correlations = {}
-            for i, symbol1 in enumerate(bot.symbols):
-                for symbol2 in bot.symbols[i+1:]:
-                    df1 = pd.DataFrame(bot.candle_history.get(symbol1, []))["close"]
-                    df2 = pd.DataFrame(bot.candle_history.get(symbol2, []))["close"]
-                    if len(df1) > 14 and len(df2) > 14:
-                        corr = df1.tail(14).corr(df2.tail(14))
-                        if corr > CORRELATION_THRESHOLD:
-                            correlations[(symbol1, symbol2)] = corr
+            price_data = {}
+            for symbol in symbols:
+                candles = bot.api_utils.get_candles(symbol, limit=100)
+                if candles and len(candles) >= 50:
+                    price_data[symbol] = [candle["close"] for candle in candles]
+                else:
+                    logger.warning(f"Insufficient candle data for {symbol}")
+                    return None
             
-            atrs = {symbol: bot.indicators.calculate_atr(symbol, bot.candle_history) for symbol in bot.symbols}
-            total_inverse_atr = sum(1 / atr if atr > 0 else 1 for atr in atrs.values())
-            for symbol in bot.symbols:
-                atr = atrs[symbol] if atrs[symbol] > 0 else 1
-                allocations[symbol] = (1 / atr / total_inverse_atr) * RISK_PER_TRADE
+            df = pd.DataFrame(price_data)
+            if df.empty or len(df) < 50:
+                logger.warning("Insufficient data for correlation calculation")
+                return None
             
-            for (s1, s2), corr in correlations.items():
-                total_alloc = allocations[s1] + allocations[s2]
-                allocations[s1] = total_alloc * 0.6
-                allocations[s2] = total_alloc * 0.4
-            
-            logger.debug(f"Portfolio allocations: {allocations}")
-            return allocations
+            return df.pct_change().corr()
         except Exception as e:
-            logger.error(f"Failed to calculate portfolio allocations: {e}")
-            return allocations
+            logger.error(f"Failed to calculate correlations: {e}")
+            return None
 
-    def calculate_margin(self, symbol: str, size_usd: float, confidence: float, volatility: float, patterns: dict, bot) -> tuple[float, float]:
-        max_leverage = bot.leverage_info.get(symbol) or bot.api_utils.get_max_leverage(symbol, bot)
-        risk_amount = size_usd
-        
-        leverage = 1.0
-        leverage_percentage = 0.0
-        if confidence > 0.7 or patterns.get("bullish_engulfing") or patterns.get("bearish_engulfing") or patterns.get("bullish_pin") or patterns.get("bearish_pin"):
-            leverage_percentage = 0.5 + (confidence - 0.7) * 1.5
-            leverage = max_leverage * min(leverage_percentage, 0.8)
-        elif confidence > 0.5 or patterns.get("doji") or patterns.get("inside_bar"):
-            leverage = min(max_leverage, 3.0)
-            leverage_percentage = leverage / max_leverage if max_leverage > 0 else 1.0
-        if volatility > 2 * VOLATILITY_THRESHOLD:
-            leverage = min(leverage, 2.0)
-            leverage_percentage = leverage / max_leverage if max_leverage > 0 else 1.0
-        
-        if confidence <= 0.7:
-            leverage = min(leverage, MAX_LEVERAGE)
-        
-        margin_amount = risk_amount * leverage * 0.8
-        logger.debug(f"Calculated margin for {symbol}: ${margin_amount:.2f} at {leverage:.2f}x leverage ({leverage_percentage*100:.1f}% of {max_leverage}x)")
-        return margin_amount, leverage
+    def calculate_margin(self, symbol: str, risk_amount: float, confidence: float, price_change: float, patterns: list[str], bot) -> tuple[float, float]:
+        try:
+            max_leverage = bot.api_utils.get_max_leverage(symbol, bot)
+            base_margin = risk_amount / max_leverage
+            confidence_factor = min(confidence, 1.0)
+            volatility_factor = min(price_change / VOLATILITY_THRESHOLD, 2.0)
+            pattern_factor = 1.0 + (0.1 * len(patterns))
+            
+            adjusted_margin = base_margin * confidence_factor * volatility_factor * pattern_factor
+            leverage = min(risk_amount / adjusted_margin, max_leverage)
+            if leverage > MAX_LEVERAGE:
+                leverage = MAX_LEVERAGE
+                adjusted_margin = risk_amount / leverage
+            
+            logger.debug(f"Margin for {symbol}: ${adjusted_margin:.2f}, Leverage: {leverage:.2f}x")
+            return adjusted_margin, leverage
+        except Exception as e:
+            logger.error(f"Failed to calculate margin for {symbol}: {e}")
+            return risk_amount, 1.0
+
+    def monitor_drawdown(self, bot) -> bool:
+        try:
+            current_balance = bot.account_balance or DEFAULT_BALANCE
+            initial_balance = bot.initial_balance or DEFAULT_BALANCE
+            drawdown = (initial_balance - current_balance) / initial_balance
+            logger.debug(f"Current drawdown: {drawdown:.2%}")
+            if drawdown > bot.config.MAX_DRAWDOWN:
+                logger.error(f"Max drawdown exceeded: {drawdown:.2%} > {bot.config.MAX_DRAWDOWN:.2%}")
+                bot.notifications.send_webhook_alert(f"Max drawdown exceeded: {drawdown:.2%}")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Failed to monitor drawdown: {e}")
+            return True
+
+    def rebalance_portfolio(self, bot):
+        try:
+            total_balance = bot.account_balance or DEFAULT_BALANCE
+            risk_per_symbol = total_balance * RISK_PER_TRADE / len(bot.symbols)
+            for symbol in bot.symbols:
+                position = bot.open_orders.get(symbol, {})
+                if not position:
+                    continue
+                current_size = position.get("size", 0.0)
+                current_price = bot.price_history[symbol][-1] if bot.price_history[symbol] else 0.0
+                if not current_price:
+                    continue
+                target_size = risk_per_symbol / current_price
+                size_diff = target_size - current_size
+                if abs(size_diff) / target_size > 0.1:
+                    logger.info(f"Rebalancing {symbol}: Adjusting size from {current_size:.4f} to {target_size:.4f}")
+                    bot.notifications.send_webhook_alert(f"Rebalancing {symbol}: Size {size_diff:.4f}")
+        except Exception as e:
+            logger.error(f"Failed to rebalance portfolio: {e}")

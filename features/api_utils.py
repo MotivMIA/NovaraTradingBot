@@ -18,6 +18,7 @@ class APIUtils:
         self.api_key = api_key
         self.api_secret = api_secret
         self.api_passphrase = api_passphrase
+        self.last_candle_fetch = {}  # Initialize last_candle_fetch
 
     def validate_credentials(self) -> bool:
         path = "/api/v1/market/tickers"
@@ -174,7 +175,7 @@ class APIUtils:
 
     def get_candles(self, symbol: str, limit: int = CANDLE_LIMIT, timeframe: str = "1m") -> list | None:
         current_time = time.time()
-        if current_time - bot.last_candle_fetch.get(symbol, {}).get(timeframe, 0) < CANDLE_FETCH_INTERVAL:
+        if current_time - self.last_candle_fetch.get(symbol, {}).get(timeframe, 0) < CANDLE_FETCH_INTERVAL:
             logger.debug(f"Skipping candle fetch for {symbol} ({timeframe}): within {CANDLE_FETCH_INTERVAL}s interval")
             return None
         path = "/api/v1/market/candles"
@@ -186,7 +187,7 @@ class APIUtils:
                 data = response.json()
                 logger.debug(f"Candle response for {symbol} ({timeframe}): {json.dumps(data, indent=2)}")
                 if data.get("code") == "0" and data.get("data"):
-                    bot.last_candle_fetch.setdefault(symbol, {})[timeframe] = current_time
+                    self.last_candle_fetch.setdefault(symbol, {})[timeframe] = current_time
                     candles = [{
                         "timestamp": int(candle[0]),
                         "open": float(candle[1]),
