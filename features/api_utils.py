@@ -9,6 +9,7 @@ import pytz
 from datetime import datetime
 from uuid import uuid4
 from logging import getLogger
+from typing import List, Dict, Tuple, Optional
 from features.config import BASE_URL, LOCAL_TZ, CANDLE_LIMIT, CANDLE_FETCH_INTERVAL, DEFAULT_BALANCE
 
 logger = getLogger(__name__)
@@ -27,7 +28,7 @@ class APIUtils:
             response.raise_for_status()
             data = response.json()
             if data.get("code") == "0":
-                logger.info("Public API request successful, credentials likely valid")
+                logger.info("Public API request successful")
                 return True
             logger.error(f"Credential validation failed: {data}")
             return False
@@ -35,7 +36,7 @@ class APIUtils:
             logger.error(f"Credential validation error: {e}")
             return False
 
-    def sign_request(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> tuple[dict, str, str]:
+    def sign_request(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> Tuple[Dict, str, str]:
         local_time = datetime.now(LOCAL_TZ)
         utc_time = local_time.astimezone(pytz.UTC)
         timestamp_ms = int(utc_time.timestamp() * 1000)
@@ -75,10 +76,9 @@ class APIUtils:
             "access-passphrase": self.api_passphrase.strip(),
             "content-type": "application/json"
         }
-        logger.debug(f"Request headers: {headers}")
         return headers, timestamp, nonce
 
-    def get_account_balance(self, bot) -> float | None:
+    def get_account_balance(self, bot) -> Optional[float]:
         try:
             outbound_ip = urllib.request.urlopen('https://api.ipify.org').read().decode()
             logger.debug(f"Outbound IP: {outbound_ip}")
@@ -98,15 +98,12 @@ class APIUtils:
                             balance = float(asset.get("balance", 0))
                             logger.info(f"Account balance: ${balance:.2f} USDT")
                             return balance
-                    logger.error("No USDT balance found in response")
+                    logger.error("No USDT balance found")
                     return None
                 logger.error(f"Unexpected balance response: {data}")
-                if data.get("code") == "152409":
-                    logger.error("Signature verification failed, possible credential mismatch")
-                if data.get("code") == "152401":
-                    logger.error("Access key does not exist, verify API key")
                 if data.get("code") == "152406":
-                    logger.error("IP whitelisting issue, verify IP settings")
+                    logger.warning(f"IP whitelisting issue, using default balance: ${DEFAULT_BALANCE:.2f} USDT")
+                    return DEFAULT_BALANCE
                 time.sleep(2 ** attempt)
             except requests.RequestException as e:
                 logger.error(f"Attempt {attempt + 1} failed: {e}")
@@ -114,11 +111,11 @@ class APIUtils:
                     time.sleep(2 ** attempt)
                 else:
                     logger.error(f"Failed after 5 attempts: {e}")
-                    return None
+                    return DEFAULT_BALANCE
         logger.warning(f"Using default balance: ${DEFAULT_BALANCE:.2f} USDT")
         return DEFAULT_BALANCE
 
-    def get_max_leverage(self, symbol: str, bot) -> float | None:
+    def get_max_leverage(self, symbol: str, bot) -> Optional[float]:
         path = "/api/v1/account/leverage-info"
         params = {"instId": symbol, "marginMode": "cross"}
         headers, _, _ = self.sign_request("GET", path, params=params)
@@ -144,7 +141,7 @@ class APIUtils:
                     return 1.0
         return 1.0
 
-    def get_instrument_info(self, symbol: str) -> dict | None:
+    def get_instrument_info(self, symbol: str) -> Optional[Dict]:
         path = "/api/v1/market/instruments"
         params = {"instType": "SWAP", "instId": symbol}
         for attempt in range(3):
@@ -152,7 +149,7 @@ class APIUtils:
                 response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
                 response.raise_for_status()
                 data = response.json()
-                logger.info(f"Instrument info for {symbol}: {json.dumps(data, indent=2)}")
+                logger.debug(f"Instrument info for {symbol}: {json.dumps(data, indent=2)}")
                 if data.get("code") == "0" and data.get("data"):
                     for inst in data["data"]:
                         if inst["instId"] == symbol:
@@ -173,13 +170,11 @@ class APIUtils:
                     return None
         return None
 
-    def get_candles(self, symbol: str, limit: int = CANDLE_LIMIT, timeframe: str = "1m") -> list | None:
+    def get_candles(self, symbol: str, limit: int = CANDLE_LIMIT, timeframe: str = "1m") -> Optional[List[Dict]]:
         current_time = time.time()
-        # Initialize last_candle_fetch for symbol/timeframe if not present
         self.last_candle_fetch.setdefault(symbol, {})
         if timeframe not in self.last_candle_fetch[symbol]:
             self.last_candle_fetch[symbol][timeframe] = 0
-        # Force fetch if no prior fetch or cache is outdated
         if self.last_candle_fetch[symbol][timeframe] == 0 or (current_time - self.last_candle_fetch[symbol][timeframe] >= CANDLE_FETCH_INTERVAL):
             path = "/api/v1/market/candles"
             params = {"instId": symbol, "bar": timeframe, "limit": str(limit)}
@@ -215,7 +210,7 @@ class APIUtils:
             logger.debug(f"Skipping candle fetch for {symbol} ({timeframe}): within {CANDLE_FETCH_INTERVAL}s interval")
             return None
 
-    def get_price(self, symbol: str) -> tuple[float, float] | None:
+    def get_price(self, symbol: str) -> Optional[Tuple[float, float]]:
         path = "/api/v1/market/tickers"
         params = {"instId": symbol}
         for attempt in range(3):
@@ -223,7 +218,7 @@ class APIUtils:
                 response = requests.get(f"{BASE_URL}{path}", params=params, timeout=5)
                 response.raise_for_status()
                 data = response.json()
-                logger.info(f"Ticker response for {symbol}: {json.dumps(data, indent=2)}")
+                logger.debug(f"Ticker response for {symbol}: {json.dumps(data, indent=2)}")
                 if data.get("code") == "0" and data.get("data") and "last" in data["data"][0]:
                     return float(data["data"][0]["last"]), float(data["data"][0]["lastSize"])
                 logger.error(f"Unexpected response: {data}")

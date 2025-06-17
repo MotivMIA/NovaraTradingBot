@@ -8,6 +8,7 @@ import argparse
 from datetime import datetime
 import glob
 from dotenv import load_dotenv
+from logtail import LogtailHandler
 from features.config import *
 from features.indicators import Indicators
 from features.trading_logic import TradingLogic
@@ -39,18 +40,30 @@ def setup_logging():
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file = os.path.join(log_dir, f"trading_bot_{timestamp}.log")
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S,%f",
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
     logger = logging.getLogger(__name__)
-    for handler in logger.handlers:
-        handler.setFormatter(MicrosecondFormatter(fmt="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S,%f"))
+    logger.setLevel(logging.DEBUG)
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(MicrosecondFormatter(fmt="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S,%f"))
+    logger.addHandler(file_handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+    logger.addHandler(console_handler)
+    
+    # Logtail handler
+    logtail_token = os.getenv('LOGTAIL_TOKEN')
+    if logtail_token:
+        logtail_handler = LogtailHandler(source_token=logtail_token)
+        logtail_handler.setFormatter(MicrosecondFormatter(fmt="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S,%f"))
+        logger.addHandler(logtail_handler)
+        logger.info("Logtail integration enabled")
+    else:
+        logger.warning("LOGTAIL_TOKEN not set, skipping Logtail integration")
+    
+    # Clean old logs
     log_files = glob.glob(os.path.join(log_dir, "trading_bot_*.log"))
     log_files.sort(key=os.path.getctime, reverse=True)
     for old_log in log_files[5:]:
@@ -71,9 +84,9 @@ load_dotenv()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 # Credentials
-API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
-API_SECRET = os.getenv("DEMO_API_SECRET" if DEMO_MODE else "API_SECRET")
-API_PASSPHRASE = os.getenv("DEMO_API_PASSPHRASE" if DEMO_MODE else "API_PASSPHRASE")
+API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY", "1068db9f2fd8486dad50c5e304b0a150")
+API_SECRET = os.getenv("DEMO_API_SECRET" if DEMO_MODE else "API_SECRET", "")
+API_PASSPHRASE = os.getenv("DEMO_API_PASSPHRASE" if DEMO_MODE else "API_PASSPHRASE", "0NS8e3oKfiW2G4O9x")
 
 if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
     logger.error("Missing API credentials in .env")
@@ -157,7 +170,7 @@ class TradingBot:
                                 last_symbol_update = time.time()
                             
                             data = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
-                            logger.info(f"WebSocket data: {json.dumps(data, indent=2)}")
+                            logger.debug(f"WebSocket data: {json.dumps(data, indent=2)}")
                             if "data" in data and data["data"]:
                                 symbol = data["arg"]["instId"]
                                 price = float(data["data"][0]["last"])
@@ -169,7 +182,7 @@ class TradingBot:
                                     self.price_history[symbol] = self.price_history[symbol][-100:]
                                     self.volume_history[symbol] = self.volume_history[symbol][-100:]
                                 
-                                candles = self.api_utils.get_candles(symbol, limit=1)
+                                candles = self.api_utils.get_candles(symbol, limit=1, timeframe="1m")
                                 if candles:
                                     self.candle_history[symbol].append(candles[0])
                                     if len(self.candle_history[symbol]) > 100:
@@ -219,7 +232,8 @@ class TradingBot:
             if balance is None:
                 logger.error("Health check failed: Could not retrieve balance")
                 return False
-            logger.info("Health check passed: API reachable, balance retrieved")
+            self.account_balance = balance
+            logger.info(f"Health check passed: Balance ${balance:.2f} USDT")
             return True
         except Exception as e:
             logger.error(f"Health check failed: {e}")

@@ -2,12 +2,13 @@ import pandas as pd
 import numpy as np
 import requests
 from logging import getLogger
+from typing import List
 from features.config import BASE_URL, MAX_SYMBOLS, CORRELATION_THRESHOLD, RISK_PER_TRADE, MAX_LEVERAGE, DEFAULT_BALANCE, VOLATILITY_THRESHOLD
 
 logger = getLogger(__name__)
 
 class PortfolioManagement:
-    def select_top_symbols(self, bot) -> list[str]:
+    def select_top_symbols(self, bot) -> List[str]:
         try:
             path = "/api/v1/market/tickers"
             response = requests.get(f"{BASE_URL}{path}", timeout=5)
@@ -27,6 +28,7 @@ class PortfolioManagement:
             top_symbols = df.sort_values(by="volume", ascending=False)["instId"].head(MAX_SYMBOLS).tolist()
             correlation_matrix = self.calculate_correlations(top_symbols, bot)
             if correlation_matrix is None:
+                logger.info(f"Selected top symbols: {top_symbols}")
                 return top_symbols
             
             selected = []
@@ -36,13 +38,15 @@ class PortfolioManagement:
                 if all(correlation_matrix.loc[symbol, s] < CORRELATION_THRESHOLD for s in selected):
                     selected.append(symbol)
             
+            if not selected:
+                selected = top_symbols[:MAX_SYMBOLS]
             logger.info(f"Selected top symbols: {selected}")
-            return selected or bot.symbols
+            return selected
         except Exception as e:
             logger.error(f"Failed to select top symbols: {e}")
             return bot.symbols
 
-    def calculate_correlations(self, symbols: list[str], bot) -> pd.DataFrame | None:
+    def calculate_correlations(self, symbols: List[str], bot) -> Optional[pd.DataFrame]:
         try:
             price_data = {}
             for symbol in symbols:
@@ -63,7 +67,7 @@ class PortfolioManagement:
             logger.error(f"Failed to calculate correlations: {e}")
             return None
 
-    def calculate_margin(self, symbol: str, risk_amount: float, confidence: float, price_change: float, patterns: list[str], bot) -> tuple[float, float]:
+    def calculate_margin(self, symbol: str, risk_amount: float, confidence: float, price_change: float, patterns: List[str], bot) -> Tuple[float, float]:
         try:
             max_leverage = bot.api_utils.get_max_leverage(symbol, bot)
             base_margin = risk_amount / max_leverage

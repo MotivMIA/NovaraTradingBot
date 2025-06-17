@@ -18,6 +18,9 @@ class Indicators:
             if not all(col in df.columns for col in required_columns):
                 logger.error(f"Missing required columns in candle data for {symbol}: {df.columns}")
                 return {}
+            if df[required_columns].isna().any().any():
+                logger.error(f"NaN values in candle data for {symbol}")
+                return {}
 
             df["close"] = df["close"].astype(float)
             df["high"] = df["high"].astype(float)
@@ -28,13 +31,13 @@ class Indicators:
 
             # VWAP
             typical_price = (df["high"] + df["low"] + df["close"]) / 3
-            window = min(VWAP_PERIOD, len(df))  # Use available data length
+            window = min(VWAP_PERIOD, len(df))
             vwap = (typical_price * df["volume"]).rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
             indicators["vwap"] = vwap.iloc[-1] if not pd.isna(vwap.iloc[-1]) else df["close"].iloc[-1]
 
             # RSI
             delta = df["close"].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=RSI_PERIOD).mean()
+            gain = delta.where(delta > 0, 0).rolling(window=RSI_PERIOD).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
             rs = gain / loss if loss.iloc[-1] != 0 else np.inf
             indicators["rsi"] = 100 - (100 / (1 + rs)) if not np.isinf(rs) else 50.0
@@ -72,17 +75,19 @@ class Indicators:
 
     def calculate_vwap(self, symbol: str, candles: List[Dict] | Dict[str, List[Dict]]) -> float:
         try:
-            # Handle dict input from tests
             if isinstance(candles, dict):
                 candles = candles.get(symbol, [])
             if not candles or len(candles) < MIN_PRICE_POINTS:
-                logger.warning(f"Insufficient candle data for VWAP calculation: {len(candles)} points")
+                logger.warning(f"Insufficient candle data for VWAP: {len(candles)} points")
                 return 0.0
 
             df = pd.DataFrame(candles)
             required_columns = ["high", "low", "close", "volume"]
             if not all(col in df.columns for col in required_columns):
-                logger.error(f"Missing required columns in candle data for {symbol}: {df.columns}")
+                logger.error(f"Missing required columns for VWAP: {df.columns}")
+                return 0.0
+            if df[required_columns].isna().any().any():
+                logger.error(f"NaN values in VWAP input for {symbol}")
                 return 0.0
 
             df["high"] = df["high"].astype(float)
@@ -91,7 +96,7 @@ class Indicators:
             df["volume"] = df["volume"].astype(float)
 
             typical_price = (df["high"] + df["low"] + df["close"]) / 3
-            window = min(VWAP_PERIOD, len(df))  # Use available data length
+            window = min(VWAP_PERIOD, len(df))
             vwap = (typical_price * df["volume"]).rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
             result = vwap.iloc[-1] if not pd.isna(vwap.iloc[-1]) else df["close"].iloc[-1]
             logger.debug(f"VWAP for {symbol}: ${result:.2f}")
@@ -102,17 +107,19 @@ class Indicators:
 
     def calculate_atr(self, symbol: str, candles: List[Dict] | Dict[str, List[Dict]], period: int = 14) -> float:
         try:
-            # Handle dict input from tests
             if isinstance(candles, dict):
                 candles = candles.get(symbol, [])
             if not candles or len(candles) < MIN_PRICE_POINTS:
-                logger.warning(f"Insufficient candle data for ATR calculation: {len(candles)} points")
+                logger.warning(f"Insufficient candle data for ATR: {len(candles)} points")
                 return 0.0
 
             df = pd.DataFrame(candles)
             required_columns = ["high", "low", "close"]
             if not all(col in df.columns for col in required_columns):
-                logger.error(f"Missing required columns in candle data for {symbol}: {df.columns}")
+                logger.error(f"Missing required columns for ATR: {df.columns}")
+                return 0.0
+            if df[required_columns].isna().any().any():
+                logger.error(f"NaN values in ATR input for {symbol}")
                 return 0.0
 
             df["high"] = df["high"].astype(float)

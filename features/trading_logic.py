@@ -1,5 +1,6 @@
 import numpy as np
 from logging import getLogger
+from typing import Optional, Tuple, List
 from features.indicators import Indicators
 from features.config import VOLATILITY_THRESHOLD, RSI_OVERSOLD, RSI_OVERBOUGHT, MIN_PRICE_POINTS, TIMEFRAMES
 
@@ -9,7 +10,7 @@ class TradingLogic:
     def __init__(self):
         self.indicators = Indicators()
 
-    def generate_signal(self, symbol: str, current_price: float, bot):
+    def generate_signal(self, symbol: str, current_price: float, bot) -> Optional[Tuple[str, float, List[str], List[str]]]:
         logger.debug(f"Generating signal for {symbol} at price ${current_price:.2f}")
         logger.debug(f"Price history length: {len(bot.price_history[symbol])}, Candle history length: {len(bot.candle_history[symbol])}")
         if len(bot.price_history[symbol]) < MIN_PRICE_POINTS or len(bot.candle_history[symbol]) < MIN_PRICE_POINTS:
@@ -20,8 +21,10 @@ class TradingLogic:
         for tf in TIMEFRAMES:
             candles = bot.candle_history[symbol][-50:] if len(bot.candle_history[symbol]) >= 50 else bot.candle_history[symbol]
             if candles:
-                indicators[tf] = bot.indicators.calculate_indicators(symbol, candles)
-                logger.debug(f"{symbol} ({tf}) indicators - RSI: {indicators[tf].get('rsi', 0):.2f}")
+                ind = self.indicators.calculate_indicators(symbol, candles)
+                if ind:
+                    indicators[tf] = ind
+                    logger.debug(f"{symbol} ({tf}) indicators - RSI: {ind.get('rsi', 0):.2f}")
         
         volatility_passed, price_change = self.check_volatility(symbol, current_price, bot.price_history)
         if not volatility_passed:
@@ -36,18 +39,19 @@ class TradingLogic:
         for tf, ind in indicators.items():
             rsi = ind.get("rsi", 50.0)
             vwap = ind.get("vwap", current_price)
-            if rsi < RSI_OVERSOLD and current_price < vwap:
-                signals.append("buy")
-                confidences.append(0.7)
-                patterns.append("oversold")
-                used_timeframes.append(tf)
-            elif rsi > RSI_OVERBOUGHT and current_price > vwap:
-                signals.append("sell")
-                confidences.append(0.7)
-                patterns.append("overbought")
-                used_timeframes.append(tf)
+            if not pd.isna(rsi) and not pd.isna(vwap):
+                if rsi < RSI_OVERSOLD and current_price < vwap:
+                    signals.append("buy")
+                    confidences.append(0.7)
+                    patterns.append("oversold")
+                    used_timeframes.append(tf)
+                elif rsi > RSI_OVERBOUGHT and current_price > vwap:
+                    signals.append("sell")
+                    confidences.append(0.7)
+                    patterns.append("overbought")
+                    used_timeframes.append(tf)
         
-        if bot.ml.is_model_trained[symbol]:
+        if bot.is_model_trained.get(symbol, False):
             ml_signal, ml_confidence = bot.ml.predict_signal(symbol, current_price, bot)
             if ml_signal:
                 signals.append(ml_signal)
@@ -56,7 +60,7 @@ class TradingLogic:
                 used_timeframes.append("ml")
         
         if not signals:
-            logger.debug(f"No valid signal for {symbol}: confidence too low")
+            logger.debug(f"No valid signal for {symbol}: no signals generated")
             return None
         
         final_signal = max(set(signals), key=signals.count)
@@ -67,7 +71,7 @@ class TradingLogic:
         
         return final_signal, final_confidence, patterns, used_timeframes
 
-    def check_volatility(self, symbol: str, current_price: float, price_history: dict) -> tuple[bool, float]:
+    def check_volatility(self, symbol: str, current_price: float, price_history: dict) -> Tuple[bool, float]:
         try:
             prices = price_history[symbol][-10:]
             if len(prices) < 2:
@@ -83,13 +87,17 @@ class TradingLogic:
             logger.error(f"Volatility check failed for {symbol}: {e}")
             return False, 0.0
 
-    async def process_trade(self, symbol: str, price: float, signal: str, price_change: float, confidence: float, patterns: list, timeframes: list, bot):
+    async def process_trade(self, symbol: str, price: float, signal: str, price_change: float, confidence: float, patterns: List[str], timeframes: List[str], bot):
         try:
             risk_amount = bot.account_balance * RISK_PER_TRADE
             margin, leverage = bot.portfolio.calculate_margin(symbol, risk_amount, confidence, price_change, patterns, bot)
-            size = margin / price
+            size = margin / price if price != 0 else 0.0
+            if size <= 0:
+                logger.warning(f"Invalid trade size for {symbol}: {size:.4f}")
+                return
             logger.info(f"Processing {signal} trade for {symbol}: size {size:.4f}, leverage {leverage:.2f}x")
             bot.analytics.log_trade(symbol, int(time.time()), 0, price, 0, size, leverage, {}, timeframes, signal, bot)
+            bot.notifications.send_webhook_alert(f"{signal.upper()} trade for {symbol}: {size:.4f} at ${price:.2f}, leverage {leverage:.2f}x")
         except Exception as e:
             logger.error(f"Failed to process trade for {symbol}: {e}")
 
@@ -114,7 +122,7 @@ class TradingLogic:
             position = bot.open_orders.get(symbol, {})
             if not position:
                 return
-            atr = bot.indicators.calculate_atr(symbol, bot.candle_history)
+            atr = self.indicators.calculate_atr(symbol, bot.candle_history)
             trailing_stop = position.get("trailing_stop", current_price)
             if position["side"] == "buy":
                 new_stop = current_price - atr * TRAILING_STOP_MULTIPLIER
