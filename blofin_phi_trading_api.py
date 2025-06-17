@@ -454,6 +454,49 @@ class TradingBot:
             logger.error(f"Credential validation error: {e}")
             return False
 
+    def sign_request(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> tuple[dict, str, str]:
+        local_time = datetime.now(LOCAL_TZ)
+        utc_time = local_time.astimezone(pytz.UTC)
+        timestamp_ms = int(utc_time.timestamp() * 1000)
+        system_time_ms = int(time.time() * 1000)
+        if abs(timestamp_ms - system_time_ms) > 30000:
+            logger.warning(f"Timestamp offset: {timestamp_ms} ms vs system {system_time_ms} ms")
+        timestamp = str(timestamp_ms)
+        nonce = str(uuid4())
+        
+        path_with_params = path
+        if params:
+            query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+            path_with_params += f"?{query}"
+        
+        body_str = json.dumps(body, separators=(',', ':'), sort_keys=True) if body else ""
+        content = path_with_params + method.upper() + timestamp + nonce + body_str
+        
+        logger.debug(f"Local time: {local_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
+        logger.debug(f"UTC time: {utc_time.strftime('%Y-%m-%d %H:%M:%S,%f %Z')}")
+        logger.debug(f"Timestamp (ms): {timestamp_ms}")
+        logger.debug(f"Signature message: {content}")
+        
+        sign_token = hmac.new(
+            API_SECRET.encode(),
+            content.encode(),
+            hashlib.sha256
+        ).hexdigest().encode()
+        signature = base64.b64encode(sign_token).decode()
+        
+        logger.debug(f"Generated signature: {signature}")
+        
+        headers = {
+            "access-key": API_KEY.strip(),
+            "access-sign": signature,
+            "access-timestamp": timestamp,
+            "access-nonce": nonce,
+            "access-passphrase": API_PASSPHRASE.strip(),
+            "content-type": "application/json"
+        }
+        logger.debug(f"Request headers: {headers}")
+        return headers, timestamp, nonce
+
     def get_account_balance(self) -> float | None:
         import urllib.request
         try:
@@ -1088,112 +1131,14 @@ class TradingBot:
             logger.info(f"Trade executed for {symbol}: {side} ${risk_amount:.2f} at ${price}")
             self.account_balance -= risk_amount * 0.01
 
-    async def ws_connect(self, max_retries: int = 10):
-        retry_count = 0
-        while retry_count < max_retries:
-            logger.debug(f"WebSocket connection attempt to {WS_URL} at {datetime.now(LOCAL_TZ)}")
-            try:
-                async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
-                    logger.info("WebSocket connected")
-                    for symbol in self.symbols:
-                        await ws.send(json.dumps({
-                            "op": "subscribe",
-                            "args": [{"channel": "tickers", "instId": symbol}]
-                        }))
-                        logger.info(f"Subscribed to {symbol} ticker")
-                        self.load_candles(symbol)
-                        for tf in TIMEFRAMES:
-                            candles = self.get_candles(symbol, timeframe=tf)
-                            if candles:
-                                self.candle_history[symbol] = candles
-                                self.save_candles(symbol)
-                                logger.info(f"Fetched {len(candles)} initial {tf} candles for {symbol}")
-                    
-                    last_order_time = {symbol: 0 for symbol in self.symbols}
-                    last_symbol_update = 0
-                    order_interval = 60
-                    last_price = {symbol: None for symbol in self.symbols}
-                    price_change_threshold = VOLATILITY_THRESHOLD
-                    
-                    while True:
-                        try:
-                            if time.time() - last_symbol_update > 3600:
-                                new_symbols = self.select_top_symbols()
-                                for symbol in new_symbols:
-                                    if symbol not in self.symbols:
-                                        self.candle_history[symbol] = []
-                                        self.price_history[symbol] = []
-                                        self.volume_history[symbol] = []
-                                        self.last_candle_fetch[symbol] = {tf: 0 for tf in TIMEFRAMES}
-                                        self.is_model_trained[symbol] = False
-                                        self.last_model_train[symbol] = 0
-                                        self.leverage_info[symbol] = None
-                                        self.open_orders[symbol] = {}
-                                        self.sentiment_cache[symbol] = {"score": 0.0, "timestamp": 0}
-                                        await ws.send(json.dumps({
-                                            "op": "subscribe",
-                                            "args": [{"channel": "tickers", "instId": symbol}]
-                                        }))
-                                self.symbols = new_symbols
-                                last_symbol_update = time.time()
-                            
-                            data = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
-                            logger.info(f"WebSocket data: {json.dumps(data, indent=2)}")
-                            if "data" in data and data["data"]:
-                                symbol = data["arg"]["instId"]
-                                price = float(data["data"][0]["last"])
-                                volume = float(data["data"][0]["lastSize"])
-                                logger.info(f"WebSocket price for {symbol}: ${price}")
-                                self.price_history[symbol].append(price)
-                                self.volume_history[symbol].append(volume)
-                                if len(self.price_history[symbol]) > 100:
-                                    self.price_history[symbol] = self.price_history[symbol][-100:]
-                                    self.volume_history[symbol] = self.volume_history[symbol][-100:]
-                                
-                                candles = self.get_candles(symbol, limit=1)
-                                if candles:
-                                    self.candle_history[symbol].append(candles[0])
-                                    if len(self.candle_history[symbol]) > 100:
-                                        self.candle_history[symbol] = self.candle_history[symbol][-100:]
-                                    self.save_candles(symbol)
-                                
-                                self.manage_cost_averaging(symbol, price)
-                                self.manage_trailing_stop(symbol, price)
-                                
-                                current_time = time.time()
-                                if last_price[symbol] is None:
-                                    last_price[symbol] = price
-                                    continue
-                                
-                                price_change = abs(price - last_price[symbol]) / last_price[symbol]
-                                if current_time - last_order_time[symbol] >= order_interval and price_change >= price_change_threshold:
-                                    signal_info = self.generate_signal(symbol, price)
-                                    if signal_info:
-                                        signal, confidence, patterns, timeframes = signal_info
-                                        logger.info(f"Signal for {symbol}: {signal} with confidence {confidence:.2f}")
-                                        await self.process_trade(symbol, price, signal, price_change, confidence, patterns, timeframes)
-                                        last_order_time[symbol] = current_time
-                                        last_price[symbol] = price
-                            await asyncio.sleep(0.2)
-                        except (websockets.exceptions.ConnectionClosed, json.JSONDecodeError, asyncio.TimeoutError) as e:
-                            logger.error(f"WebSocket error: {e}")
-                            break
-            except Exception as e:
-                logger.error(f"WebSocket connection failed: {e}")
-                retry_count += 1
-                if retry_count < max_retries:
-                    logger.info(f"Retrying WebSocket (attempt {retry_count + 1}/{max_retries})")
-                    await asyncio.sleep(2 ** retry_count)
-                else:
-                    logger.error(f"Failed after {max_retries} attempts")
-                    break
-
     async def health_check(self):
         logger.info("Running health check")
         try:
+            logger.debug("Attempting to validate credentials")
             if not self.validate_credentials():
                 logger.error("Health check failed: Credential validation")
                 return False
+            logger.debug("Credentials validated, attempting to retrieve balance")
             balance = self.get_account_balance()
             if balance is None:
                 logger.error("Health check failed: Could not retrieve balance")
