@@ -1,11 +1,9 @@
-# Backtesting logic
-import sqlite3
 import pandas as pd
 import sqlite3
 import numpy as np
 from logging import getLogger
 import time
-from features.config import VOLATILITY_THRESHOLD, RISK_PER_TRADE, TRAILING_STOP_MULTIPLIER, COST_AVERAGE_DIP, DEFAULT_BALANCE
+from features.config import VOLATILITY_THRESHOLD, RISK_PER_TRADE, TRAILING_STOP_MULTIPLIER, COST_AVERAGE_DIP, DEFAULT_BALANCE, DB_PATH
 
 logger = getLogger(__name__)
 

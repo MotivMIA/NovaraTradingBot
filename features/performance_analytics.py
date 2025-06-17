@@ -1,17 +1,20 @@
 # Trade logging, performance reports, plots
-import sqlite3
 import pandas as pd
+import sqlite3
 import json
-import os
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
 from logging import getLogger
+from datetime import datetime
+import os
+from features.notifications import Notifications
+from features.config import DB_PATH
 
 logger = getLogger(__name__)
 
 class PerformanceAnalytics:
-    def log_trade(self, symbol: str, entry_time: int, exit_time: int, entry_price: float, exit_price: float, size: float, leverage: float, features_used: dict, timeframes: list, side: str, notifications: Notifications):
+    def log_trade(self, symbol: str, entry_time: int, exit_time: int, entry_price: float, exit_price: float, size: float, leverage: float, features_used: dict, timeframes: list, side: str, bot):
         try:
             profit_loss = (exit_price - entry_price) * size if side == "buy" else (entry_price - exit_price) * size
             conn = sqlite3.connect(DB_PATH)
@@ -23,11 +26,11 @@ class PerformanceAnalytics:
             conn.commit()
             conn.close()
             logger.info(f"Logged trade for {symbol}: P/L ${profit_loss:.2f}")
-            notifications.send_webhook_alert(f"Trade closed for {symbol}: P/L ${profit_loss:.2f}, Leverage: {leverage:.2f}x")
+            bot.notifications.send_webhook_alert(f"Trade closed for {symbol}: P/L ${profit_loss:.2f}, Leverage: {leverage:.2f}x")
         except sqlite3.Error as e:
             logger.error(f"Failed to log trade for {symbol}: {e}")
 
-    def analyze_performance(self, notifications: Notifications) -> dict | None:
+    def analyze_performance(self, bot):
         try:
             conn = sqlite3.connect(DB_PATH)
             df = pd.read_sql("SELECT * FROM trades", conn)
@@ -50,13 +53,13 @@ class PerformanceAnalytics:
                 "feature_impact": feature_impact
             }
             logger.info(f"Performance report: {json.dumps(report, indent=2)}")
-            notifications.send_webhook_alert(f"Performance Report: Win Rate {win_rate:.2%}, Sharpe {sharpe_ratio:.2f}")
+            bot.notifications.send_webhook_alert(f"Performance Report: Win Rate {win_rate:.2%}, Sharpe {sharpe_ratio:.2f}")
             return report
         except Exception as e:
             logger.error(f"Failed to analyze performance: {e}")
             return None
 
-    def generate_performance_plots(self, notifications: Notifications):
+    def generate_performance_plots(self, bot):
         try:
             conn = sqlite3.connect(DB_PATH)
             df = pd.read_sql("SELECT * FROM trades", conn)
@@ -76,6 +79,6 @@ class PerformanceAnalytics:
             plot_file = os.path.join(plot_dir, f"performance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
             fig.write_html(plot_file)
             logger.info(f"Generated performance plot: {plot_file}")
-            notifications.send_webhook_alert(f"New performance plot generated: {plot_file}")
+            bot.notifications.send_webhook_alert(f"New performance plot generated: {plot_file}")
         except Exception as e:
             logger.error(f"Failed to generate performance plots: {e}")

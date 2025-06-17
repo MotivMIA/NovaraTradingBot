@@ -28,3 +28,4 @@ CORRELATION_THRESHOLD = 0.7
 COST_AVERAGE_DIP = 0.02
 COST_AVERAGE_LIMIT = 2
 TRAILING_STOP_MULTIPLIER = 1.5
+DB_PATH = os.path.join("/opt/render/project/src/db", "market_data.db") if os.getenv("RENDER") else os.path.join(os.path.dirname(__file__), "..", "market_data.db")

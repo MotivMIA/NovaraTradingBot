@@ -1,4 +1,3 @@
-# Main script
 import asyncio
 import logging
 import os
@@ -73,7 +72,6 @@ DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
 BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
 WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public" if DEMO_MODE else "wss://openapi.blofin.com/ws/public"
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-DB_PATH = os.path.join("/opt/render/project/src/db", "market_data.db") if os.getenv("RENDER") else os.path.join(os.path.dirname(__file__), "market_data.db")
 
 # Credentials
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY")
@@ -273,6 +271,7 @@ class TradingBot:
             price_volume = self.api_utils.get_price(symbol)
             if not price_volume:
                 logger.error(f"Failed to get initial price for {symbol}")
+                continue
             price, volume = price_volume
             logger.info(f"Current price for {symbol}: ${price}")
             self.price_history[symbol].append(price)
