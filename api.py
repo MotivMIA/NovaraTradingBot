@@ -1,11 +1,9 @@
 import asyncio
 import logging
-import os
 import socket
 import sys
 import argparse
 from datetime import datetime
-import pytz
 import glob
 from dotenv import load_dotenv
 from features.config import *
@@ -68,9 +66,6 @@ logger.debug(f"Local hostname: {socket.gethostname()}")
 load_dotenv()
 
 # Configuration
-DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
-BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
-WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public" if DEMO_MODE else "wss://openapi.blofin.com/ws/public"
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 # Credentials
@@ -84,9 +79,6 @@ if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
 
 logger.debug(f"api-key: {API_KEY[:4]}...{API_KEY[-4:]}")
 logger.debug(f"access-passphrase: {API_PASSPHRASE[:4]}...{API_PASSPHRASE[-4:]}")
-
-# Timezone
-LOCAL_TZ = pytz.timezone("America/Los_Angeles")
 
 class TradingBot:
     def __init__(self):

@@ -1,4 +1,3 @@
-# API authentication, credential validation, balance/leverage queries
 import base64
 import hmac
 import hashlib
@@ -6,10 +5,11 @@ import json
 import requests
 import time
 import urllib.request
+import pytz
 from datetime import datetime
 from uuid import uuid4
 from logging import getLogger
-from features.config import CANDLE_LIMIT, CANDLE_FETCH_INTERVAL
+from features.config import BASE_URL, LOCAL_TZ, CANDLE_LIMIT, CANDLE_FETCH_INTERVAL, DEFAULT_BALANCE
 
 logger = getLogger(__name__)
 

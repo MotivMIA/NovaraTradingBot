@@ -1,4 +1,12 @@
+import os
+import pytz
+
 # Configuration constants for NovaraTradingBot
+DEMO_MODE = os.getenv("DEMO_MODE", "True").lower() == "true"
+BASE_URL = "https://demo-trading-openapi.blofin.com" if DEMO_MODE else "https://openapi.blofin.com"
+WS_URL = "wss://demo-trading-openapi.blofin.com/ws/public" if DEMO_MODE else "wss://openapi.blofin.com/ws/public"
+LOCAL_TZ = pytz.timezone("America/Los_Angeles")
+
 RISK_PER_TRADE = 0.01
 SIZE_PRECISION = 8
 RSI_PERIOD = 14
