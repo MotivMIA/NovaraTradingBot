@@ -3,7 +3,7 @@ import pandas as pd
 import sqlite3
 import plotly.graph_objects as go
 from logging import getLogger
-from features.config import DB_PATH
+from features.config import DB_PATH, DEFAULT_BALANCE
 
 logger = getLogger(__name__)
 
@@ -28,6 +28,13 @@ def load_candles(symbol: str):
     try:
         table_name = symbol.replace("-", "_") + "_candles"
         conn = sqlite3.connect(DB_PATH)
+        # Check if table exists
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
+        if not cursor.fetchone():
+            logger.warning(f"Table {table_name} does not exist")
+            conn.close()
+            return pd.DataFrame()
         df = pd.read_sql(f"SELECT * FROM {table_name} ORDER BY timestamp DESC LIMIT 100", conn)
         conn.close()
         logger.info(f"Loaded candles for {symbol}")
@@ -57,7 +64,7 @@ else:
     st.write("No trades available")
 
 st.header("Market Data")
-symbol = st.selectbox("Select Symbol", ["BTC-USDT", "ETH-USDT", "XRP-USDT"])
+symbol = st.selectbox("Select Symbol", ["ONDO-USDT", "WIF-USDT", "KAS-USDT"])
 candles = load_candles(symbol)
 if not candles.empty:
     fig = go.Figure(data=[
@@ -71,7 +78,7 @@ if not candles.empty:
     ])
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.write("No candle data available")
+    st.write(f"No candle data available for {symbol}")
 
 st.header("Performance Metrics")
 if not trades.empty:
