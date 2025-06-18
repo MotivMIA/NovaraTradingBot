@@ -1,4 +1,4 @@
-from features.config import SYMBOLSn
+from features.config import SYMBOLS
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -65,7 +65,7 @@ else:
     st.write("No trades available")
 
 st.header("Market Data")
-symbol = st.selectbox("Select Symbol", ["ONDO-USDT", "WIF-USDT", "KAS-USDT"])
+symbol = st.selectbox("Select Symbol", SYMBOLS)
 candles = load_candles(symbol)
 if not candles.empty:
     fig = go.Figure(data=[
