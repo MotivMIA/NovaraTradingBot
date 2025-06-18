@@ -1,3 +1,4 @@
+from features.config import SYMBOLSn
 import streamlit as st
 import pandas as pd
 import sqlite3
