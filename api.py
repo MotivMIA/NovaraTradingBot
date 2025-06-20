@@ -75,7 +75,7 @@ logger = setup_logging()
 logger.debug(f"Local hostname: {socket.gethostname()}")
 
 load_dotenv(".env.local")
-
+logger.debug(f"Loaded .env.local from: {os.path.abspath(".env.local")}")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 API_KEY = os.getenv("DEMO_API_KEY" if DEMO_MODE else "API_KEY", "1068db9f2fd8486dad50c5e304b0a150")
