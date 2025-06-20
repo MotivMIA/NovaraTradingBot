@@ -1,99 +1,99 @@
-## NovaraTradingBot Links
+# NovaraTradingBot Links
 
-This document serves as the central hub for all critical URLs related to the NovaraTradingBot project, including code repositories, webhook configurations, API endpoints, deployment details, and communication channels. It ensures seamless collaboration, accurate configurations, and error-free operations for the trading bot.
+## Overview
+This document centralizes all critical URLs for the NovaraTradingBot project, now structured as a multi-bot architecture with specialized bots feeding insights to a main orchestrator bot. It ensures seamless coordination, accurate configurations, and maximized trading profits.
 
----
+## Quick Reference
+| Category           | Description                     | URL                                           |
+|--------------------|---------------------------------|-----------------------------------------------|
+| Main Bot           | Trade orchestrator              | [Main Bot](https://novara-tradingbot.onrender.com/) |
+| Trend & Momentum   | RSI, MACD, trends               | [Trend Bot](https://trend-bot.onrender.com/) |
+| Volatility & Volume| ATR, Bollinger, volume          | [Volume Bot](https://volume-bot.onrender.com/) |
+| Prediction & Sentiment | ML, X sentiment             | [Predict Bot](https://predict-bot.onrender.com/) |
+| Arbitrage & Order Book | Price diffs, liquidity       | [Arbitrage Bot](https://arbitrage-bot.onrender.com/) |
+| Patterns & Risk    | Candlesticks, risk ratios       | [Pattern Bot](https://pattern-bot.onrender.com/) |
+| Discord Webhook    | Notifications                   | [Webhook](https://discord.com/api/webhooks/1385514247626297365/...) |
+| BloFin Signal      | Trading signals (demo)          | [Webhook](https://demo-trading-api.blofin.com/uapi/v1/algo/signal/trigger/) |
+| BloFin API         | Market data                     | [Endpoint](https://api.blofin.com/v1/market/candles/) |
 
-### Project Repositories
+## Project Repositories
+- **Main Repository**: https://github.com/MotivMIA/NovaraTradingBot
+  Hosts the main bot’s codebase.
+- **Trend & Momentum Bot**: https://github.com/MotivMIA/TrendBot
+  *Create repo for trend and momentum analysis.*
+- **Volatility & Volume Bot**: https://github.com/MotivMIA/VolumeBot
+  *Create repo for volatility and volume analysis.*
+- **Prediction & Sentiment Bot**: https://github.com/MotivMIA/PredictBot
+  *Create repo for prediction and sentiment analysis.*
+- **Arbitrage & Order Book Bot**: https://github.com/MotivMIA/ArbitrageBot
+  *Create repo for arbitrage and order book analysis.*
+- **Patterns & Risk Bot**: https://github.com/MotivMIA/PatternBot
+  *Create repo for pattern recognition and risk assessment.*
+- **Documentation Folder**: https://github.com/MotivMIA/NovaraTradingBot/tree/main/docs
+  *Ensure `/docs` exists.*
+- **Webhook Setup Guide**: https://github.com/MotivMIA/NovaraTradingBot/blob/main/docs/webhook_setup.md
+- **BloFin API Configuration**: https://github.com/MotivMIA/NovaraTradingBot/blob/main/docs/blofin_api_config.md
 
-- **Main Repository**: [NovaraTradingBot GitHub Repository](https://github.com/MotivMIA/NovaraTradingBot)  
-    The core codebase for NovaraTradingBot, hosting source files and configurations.
+## Webhooks
+- **Discord Webhook**: https://discord.com/api/webhooks/1385514247626297365/cBZ6GkIeM4pxe1JJLoVsl_dSP2m8VaCk2d4iCFtBsQHofpMzJDcIEwkY1kFg7QuDK-r6
+  Sends notifications to Discord.
+  *Test: `curl -X POST -H "Content-Type: application/json" -d '{"content":"Test"}' <URL>`*
+- **BloFin Signal Webhook**: https://demo-trading-api.blofin.com/uapi/v1/algo/signal/trigger
+  Triggers trades in BloFin’s Signal Bot (demo).
+  *Test: `curl -X POST -H "Content-Type: application/json" -d '{"action":"buy","marketPosition":"long","prevMarketPosition":"flat","instrument":"BTCUSD","signalToken":"...","timestamp":"2025-06-20T02:16:00Z","maxLag":"60","investmentType":"base","amount":"10","id":"test123"}' <URL>`*
+  *Update to production: https://api.blofin.com/uapi/v1/algo/signal/trigger*
 
-- **Documentation Folder**: [Docs Folder](https://github.com/MotivMIA/NovaraTradingBot/tree/main/docs)  
-    Create a `/docs` folder in the repository to store documentation files.  
-    Run: `mkdir docs && git add docs && git commit -m "Create docs folder" && git push origin main`.
+## APIs
+- **Main Bot Receive Endpoint**: https://novara-tradingbot.onrender.com/receive
+  Receives analysis from specialized bots.
+  *Test: `curl -X POST -H "Content-Type: application/json" -d '{"botId":"trend-bot","analysis":{"rsi":75,"signal":"sell"}}' <URL>`*
+- **BloFin API Endpoint**: https://api.blofin.com/v1/market/candles
+  Fetches market data.
+  *Test: `curl -H "X-API-KEY: your_key" -H "X-API-SECRET: your_secret" <URL>?symbol=BTCUSD`*
+- **BloFin API Documentation**: https://docs.blofin.com/index.html#overview
+- **BloFin Support**: https://support.blofin.com/hc/en-us
 
-- **Webhook Setup Guide**: [Webhook Setup Documentation](https://github.com/MotivMIA/NovaraTradingBot/blob/main/docs/webhook_setup.md)  
-    Create `webhook_setup.md` in `/docs` with instructions for Discord and BloFin webhooks (see Notes for sample content).
+## Deployment
+- **Render Project Dashboard**: https://dashboard.render.com/project/prj-d17eu27diees73e5ap40
+- **Main Bot URL**: https://novara-tradingbot.onrender.com
+  *Confirm public URL in Render.*
+- **Trend & Momentum Bot URL**: https://trend-bot.onrender.com
+  *Create Render service.*
+- **Volatility & Volume Bot URL**: https://volume-bot.onrender.com
+  *Create Render service.*
+- **Prediction & Sentiment Bot URL**: https://predict-bot.onrender.com
+  *Create Render service.*
+- **Arbitrage & Order Book Bot URL**: https://arbitrage-bot.onrender.com
+  *Create Render service.*
+- **Patterns & Risk Bot URL**: https://pattern-bot.onrender.com
+  *Create Render service.*
+- **Render Documentation**: https://docs.render.com
 
-- **BloFin API Configuration**: [BloFin API Config Documentation](https://github.com/MotivMIA/NovaraTradingBot/blob/main/docs/blofin_api_config.md)  
-    Optional: Create `blofin_api_config.md` to document API keys, endpoints, and authentication details.
+## Communication
+- **Discord Server**: https://discord.gg/ZcM6r4Pd
+  *Verify invite.*
+- **Google Drive Folder**: https://drive.google.com/drive/folders/1SG64pWFwuPpE89yTMg1tDPzOf_BqH2as?usp=drive_link
+- **GitHub Issues**: https://github.com/MotivMIA/NovaraTradingBot/issues
 
----
+## Additional Resources
+- **Docker Hub Repository**: https://hub.docker.com/r/MotivMIA/novaratradingbot
+  *Update for each bot if using Docker.*
+- **TradingView**: https://www.tradingview.com
+  *Optional for future webhook integration.*
 
-### Webhooks
+## Usage
+- **Maintenance**: Update URLs as new bots are deployed. Push to GitHub:
+  ```bash
+  git add docs/links.md
+  git commit -m "Update links.md with new bots"
+  git push origin main
+  ```
+- **Verification Checklist**:
+  - [ ] Test Discord and BloFin webhooks.
+  - [ ] Verify main bot receives data from all specialized bots.
+  - [ ] Confirm BloFin API returns valid data.
+  - [ ] Ensure all Render URLs are accessible.
+  - [ ] Check Discord/Google Drive access.
 
-- **Discord Webhook**: [Discord Webhook URL](https://discord.com/api/webhooks/1385514247626297365/cBZ6GkIeM4pxe1JJLoVsl_dSP2m8VaCk2d4iCFtBsQHofpMzJDcIEwkY1kFg7QuDK-r6)  
-    Sends real-time notifications (e.g., trade executions) to a Discord channel.  
-    Test with:  
-    ```bash
-    curl -X POST -H "Content-Type: application/json" -d '{"content":"Test from NovaraTradingBot"}' <URL>
-    ```  
-    If it fails (e.g., 400 Bad Request), regenerate in Discord: Channel > Edit > Integrations > Webhooks.
-
-- **BloFin Signal Webhook**: [BloFin Signal Webhook URL](https://demo-trading-api.blofin.com/uapi/v1/algo/signal/trigger)  
-    Triggers automated trades in BloFin’s Signal Bot (demo environment).  
-    Integrated into bot code due to lack of TradingView account (see `webhook_setup.md`).  
-    For production, update to: `https://api.blofin.com/uapi/v1/algo/signal/trigger`.  
-    Test with:  
-    ```bash
-    curl -X POST -H "Content-Type: application/json" -d '{"action":"buy","marketPosition":"long","prevMarketPosition":"flat","instrument":"BTCUSD","signalToken":"+50PtBb5CLeGah94UCNpAhgtnSdgXDbZqzVIkWq3To9egvRxc5TSpn/tzsDtgOPyRodeY1Dm2EpPLgqQplb9ew==","timestamp":"2025-06-20T01:53:00Z","maxLag":"60","investmentType":"base","amount":"10","id":"test123"}' <URL>
-    ```
-
----
-
-### APIs
-
-- **BloFin API Endpoint**: [BloFin Market Data API](https://api.blofin.com/v1/market/candles)  
-    Retrieves market data (e.g., BTC/USD candlestick data) for trading algorithms.  
-    Test with:  
-    ```bash
-    curl -H "X-API-KEY: your_key" -H "X-API-SECRET: your_secret" <URL>?symbol=BTCUSD
-    ```  
-    If IP restricted, use a VPN or contact BloFin support.
-
-- **BloFin API Documentation**: [BloFin API Docs](https://docs.blofin.com/index.html#overview)  
-    Comprehensive guide for API setup, endpoints, and authentication.
-
-- **BloFin Support**: [BloFin Support Center](https://support.blofin.com/hc/en-us)  
-    Resource for resolving API issues, account queries, or IP restrictions.
-
----
-
-### Deployment
-
-- **Render Project Dashboard**: [Render Dashboard](https://dashboard.render.com/project/prj-d17eu27diees73e5ap40)  
-    Centralized management for the NovaraTradingBot service, including environment variables and logs.
-
-- **Deployed Bot URL**: [NovaraTradingBot Render URL](https://novara-tradingbot.onrender.com)  
-    Placeholder: Replace with the actual public URL from Render (Dashboard > novara-tradingbot > Open).  
-    If no public URL, confirm if the service is a private worker or misconfigured (check Settings > Type, Port).
-
-- **Render Documentation**: [Render Docs](https://docs.render.com)  
-    Reference for deployment configurations, environment variables, and troubleshooting.
-
----
-
-### Communication
-
-- **Discord Server**: [NovaraTradingBot Discord](https://discord.gg/ZcM6r4Pd)  
-    Primary hub for team discussions, bot notifications, and collaboration.  
-    Ensure invite is active; regenerate if expired (Server > Invite People).
-
-- **Google Drive Folder**: [Shared Google Drive Folder](https://drive.google.com/drive/folders/1SG64pWFwuPpE89yTMg1tDPzOf_BqH2as?usp=drive_link)  
-    Shared repository for project documents, such as trading logs and configuration files.
-
-- **GitHub Issues**: [NovaraTradingBot GitHub Issues](https://github.com/MotivMIA/NovaraTradingBot/issues)  
-    Platform for tracking bugs, feature requests, and project tasks (e.g., webhook errors, API failures).
-
----
-
-### Additional Resources
-
-- **Docker Hub Repository**: [NovaraTradingBot Docker Hub](https://hub.docker.com/r/MotivMIA/novaratradingbot)  
-    Create a Docker Hub repository under MotivMIA if using Docker images. Update if using a different account.
-
-- **TradingView**: [TradingView](https://www.tradingview.com)  
-    Optional: Requires Pro/Pro+/Premium for webhook alerts. Currently using bot code for BloFin signals.
-
----
+## Notes
+- **Last Updated**: June 20, 2025, 02:16 AM PDT
