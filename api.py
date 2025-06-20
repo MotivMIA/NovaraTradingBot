@@ -305,3 +305,59 @@ class TradingBot:
 
 if __name__ == "__main__":
     bot = TradingBot()
+from features.config import BASE_URL, SYMBOLS, CANDLE_LIMIT, CANDLE_TIMEFRAME
+from features.database import Database
+
+import requests  # Ensure requests is imported
+
+def fetch_historical_candles(symbol):
+    url = f"{BASE_URL}/v1/market/candles"
+    params = {"symbol": symbol, "interval": CANDLE_TIMEFRAME, "limit": CANDLE_LIMIT}
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        data = response.json().get("data", [])
+        candles = [
+            {
+                "timestamp": int(candle[0]),
+                "open": float(candle[1]),
+                "high": float(candle[2]),
+                "low": float(candle[3]),
+                "close": float(candle[4]),
+                "volume": float(candle[5])
+            }
+            for candle in data
+        ]
+        return candles  # Ensure the function returns the candles
+    else:
+        return []  # Handle cases where the response is not successful
+import requests
+from features.config import BASE_URL, SYMBOLS, CANDLE_LIMIT, CANDLE_TIMEFRAME
+from features.database import Database
+
+from features.config import SYMBOLS  # Ensure SYMBOLS is imported
+
+def fetch_historical_candles(symbol):
+    url = f"{BASE_URL}/v1/market/candles"
+    params = {"symbol": symbol, "interval": CANDLE_TIMEFRAME, "limit": CANDLE_LIMIT}
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        data = response.json().get("data", [])
+        candles = [
+            {
+                "timestamp": int(candle[0]),
+                "open": float(candle[1]),
+                "high": float(candle[2]),
+                "low": float(candle[3]),
+                "close": float(candle[4]),
+                "volume": float(candle[5])
+            }
+            for candle in data
+        ]
+        Database().save_candles(symbol, candles)
+        return len(candles)
+    return 0
+
+if __name__ == "__main__":
+    for symbol in SYMBOLS:
+        num_candles = fetch_historical_candles(symbol)
+        print(f"Fetched {num_candles} candles for {symbol}")
