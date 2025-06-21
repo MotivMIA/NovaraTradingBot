@@ -1,0 +1,1 @@
+# Empty file to mark bots/ as a Python package

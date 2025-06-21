@@ -1,66 +1,44 @@
 import pandas as pd
 import numpy as np
 import logging
-from pypfopt import EfficientFrontier, risk_models, expected_returns
+from typing import Dict, Optional
+from config import Config
+from pypfopt.efficient_frontier import EfficientFrontier
+from pypfopt import risk_models, expected_returns
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class PortfolioManagement:
-    def select_symbols(self, bot, max_symbols: int = 10) -> list:
-        try:
-            correlations = self.calculate_correlations(bot)
-            vols = {s: np.std([c["close"] for c in bot.candle_history[s]]) for s in bot.symbols}
-            vols = sorted(vols.items(), key=lambda x: x[1], reverse=True)
-            selected = []
-            for symbol, _ in vols[:max_symbols]:
-                if all(correlations.get((symbol, s), 0) < 0.7 for s in selected):
-                    selected.append(symbol)
-            return selected[:max_symbols]
-        except Exception as e:
-            logger.error(f"Error selecting symbols: {e}")
-            return bot.symbols[:max_symbols]
+    def __init__(self):
+        self.config = Config()
 
-    def calculate_margin(self, symbol: str, risk_amount: float, confidence: float, price_change: float, patterns: list, bot):
+    def optimize_portfolio(self, returns: pd.DataFrame, cov_matrix: pd.DataFrame) -> Optional[Dict]:
         try:
-            atr = bot.indicators.calculate_indicators(symbol, bot.candle_history[symbol])["atr"]
-            risk_factor = min(1.5, confidence * (price_change / bot.config.VOLATILITY_THRESHOLD) / (atr / bot.candle_history[symbol][-1]["close"]))
-            dynamic_risk = bot.config.RISK_PER_TRADE * risk_factor
-            effective_leverage = min(self.get_effective_leverage(symbol, bot), bot.config.MAX_LEVERAGE_PERCENTAGE * bot.api_utils.get_max_leverage(symbol, bot))
-            adjusted_margin = bot.account_balance * dynamic_risk / effective_leverage
-            return adjusted_margin, effective_leverage
-        except Exception as e:
-            logger.error(f"Error calculating margin for {symbol}: {e}")
-            return risk_amount, 1.0
-
-    def optimize_portfolio(self, bot):
-        try:
-            prices = {s: [c["close"] for c in bot.candle_history[s]] for s in bot.symbols}
-            df = pd.DataFrame(prices).pct_change()
-            mu = expected_returns.mean_historical_return(df)
-            S = risk_models.sample_cov(df)
+            mu = expected_returns.mean_historical_return(returns)
+            S = risk_models.sample_cov(returns)
             ef = EfficientFrontier(mu, S)
-            weights = ef.max_sharpe()
+            weights = ef.max_sharpe(risk_free_rate=self.config.RISK_PER_TRADE)
             cleaned_weights = ef.clean_weights()
-            logger.info(f"Portfolio weights: {cleaned_weights}")
-            return {s: w for s, w in cleaned_weights.items()}
+            logger.info(f"Optimized allocations: {cleaned_weights}")
+            return {"allocations": cleaned_weights, "expected_return": ef.portfolio_performance()[0]}
         except Exception as e:
             logger.error(f"Error optimizing portfolio: {e}")
-            return {s: 1/len(bot.symbols) for s in bot.symbols}
+            return None
 
-    def calculate_correlations(self, bot):
+    def adjust_position(self, symbol: str, signal: str, price: float, portfolio: Dict) -> Optional[Dict]:
         try:
-            prices = {s: [c["close"] for c in bot.candle_history[s]] for s in bot.symbols}
-            df = pd.DataFrame(prices).pct_change()
-            corr_matrix = df.corr()
-            correlations = {}
-            for i in range(len(corr_matrix)):
-                for j in range(i + 1, len(corr_matrix)):
-                    correlations[(corr_matrix.index[i], corr_matrix.index[j])] = corr_matrix.iloc[i, j]
-            return correlations
-        except Exception as e:
-            logger.error(f"Error calculating correlations: {e}")
-            return {}
+            current_position = portfolio.get(symbol, 0)
+            if signal == "buy":
+                new_position = current_position + self.config.INITIAL_BID_USD / price
+            elif signal == "sell":
+                new_position = current_position - self.config.INITIAL_BID_USD / price
+            else:
+                return portfolio
 
-    def get_effective_leverage(self, symbol: str, bot):
-        return 1.0  # Placeholder
+            portfolio[symbol] = max(new_position, 0)
+            logger.info(f"Adjusted position for {symbol}: {portfolio[symbol]}")
+            return portfolio
+        except Exception as e:
+            logger.error(f"Error adjusting position for {symbol}: {e}")
+            return None

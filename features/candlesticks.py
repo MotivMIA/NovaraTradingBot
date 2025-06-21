@@ -1,11 +1,15 @@
 import pandas as pd
 import logging
 from typing import List, Dict, Optional
+from config import Config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class CandlestickPatterns:
+    def __init__(self):
+        self.config = Config()
+
     def detect_patterns(self, symbol: str, candles: List[Dict]) -> Optional[Dict]:
         try:
             df = pd.DataFrame(candles)
@@ -39,6 +43,22 @@ class CandlestickPatterns:
                 last_candle["close"] < prev_candle["open"]):
                 patterns.append("bearish_engulfing")
                 confidence += 0.5
+
+            # Hammer: Small body, long lower wick, after downtrend
+            if (len(df) >= 3 and
+                df.iloc[-3:-1]["close"].mean() > df.iloc[-3:-1]["open"].mean() and
+                body / range_candle < 0.3 and
+                (last_candle["open"] - last_candle["low"]) / range_candle > 0.6):
+                patterns.append("hammer")
+                confidence += 0.45
+
+            # Shooting Star: Small body, long upper wick, after uptrend
+            if (len(df) >= 3 and
+                df.iloc[-3:-1]["close"].mean() < df.iloc[-3:-1]["open"].mean() and
+                body / range_candle < 0.3 and
+                (last_candle["high"] - last_candle["open"]) / range_candle > 0.6):
+                patterns.append("shooting_star")
+                confidence += 0.45
 
             if patterns:
                 logger.info(f"Candlestick patterns for {symbol}: {patterns}")

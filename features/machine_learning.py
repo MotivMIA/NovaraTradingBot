@@ -1,74 +1,69 @@
 import pandas as pd
 import numpy as np
 import logging
+from typing import Tuple, Optional
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
 from sklearn.preprocessing import StandardScaler
-import torch
-import torch.nn as nn
+from config import Config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class MachineLearning:
     def __init__(self):
-        self.models = {}
+        self.config = Config()
+        self.rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+        self.xgb_model = XGBClassifier(n_estimators=50, random_state=42, use_label_encoder=False, eval_metric="logloss")
         self.scaler = StandardScaler()
+        self.is_trained = False
 
-    async def train_ml_model(self, symbol: str, bot):
+    def prepare_features(self, candles: list, sentiment_score: float, indicators: dict) -> Optional[np.ndarray]:
+        try:
+            df = pd.DataFrame(candles).tail(self.config.ML_LOOKBACK)
+            if len(df) < self.config.ML_LOOKBACK:
+                return None
+
+            features = pd.DataFrame()
+            features["returns"] = df["close"].pct_change()
+            features["volatility"] = features["returns"].rolling(window=20).std()
+            features["volume_change"] = df["volume"].pct_change()
+            features["sentiment"] = sentiment_score
+            for key, value in indicators.items():
+                features[key] = value if isinstance(value, (int, float)) else np.nan
+
+            features = features.dropna()
+            if len(features) == 0:
+                return None
+
+            return self.scaler.fit_transform(features)
+        except Exception as e:
+            logger.error(f"Error preparing features: {e}")
+            return None
+
+    def train_model(self, features: np.ndarray, target: np.ndarray):
+        try:
+            self.rf_model.fit(features, target)
+            self.xgb_model.fit(features, target)
+            self.is_trained = True
+            logger.info("ML models trained successfully")
+        except Exception as e:
+            logger.error(f"Error training ML models: {e}")
+
+    def predict_signal(self, symbol: str, price: float, bot) -> Tuple[Optional[str], float]:
         try:
             candles = bot.candle_history[symbol]
-            if len(candles) < 50:
-                return
-
-            df = pd.DataFrame(candles)
             indicators = bot.indicators.calculate_indicators(symbol, candles)
-            x_sentiment = bot.sentiment.get_x_sentiment(symbol)
-            news_sentiment = bot.sentiment.get_news_sentiment(symbol)
-
-            features = pd.DataFrame({
-                "rsi": df["close"].apply(lambda x: bot.indicators.calculate_rsi(df["close"]).iloc[-1]),
-                "macd": df["close"].apply(lambda x: bot.indicators.calculate_macd(df["close"])[0].iloc[-1]),
-                "x_sentiment": x_sentiment,
-                "news_sentiment": news_sentiment
-            })
-
-            target = (df["close"].shift(-1) > df["close"]).astype(int)
-            X = features[:-1]
-            y = target[:-1]
-
-            X_scaled = self.scaler.fit_transform(X)
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
-            model.fit(X_scaled, y)
-            self.models[symbol] = model
-            logger.info(f"ML model trained for {symbol}")
-        except Exception as e:
-            logger.error(f"Error training ML model for {symbol}: {e}")
-
-    def predict_signal(self, symbol: str, price: float, bot):
-        try:
-            if symbol not in self.models:
+            sentiment_score = bot.sentiment.get_x_sentiment(symbol) if hasattr(bot, "sentiment") else 0.0
+            features = self.prepare_features(candles, sentiment_score, indicators)
+            if features is None or not self.is_trained:
                 return None, 0.0
 
-            indicators = bot.indicators.calculate_indicators(symbol, bot.candle_history[symbol])
-            x_sentiment = bot.sentiment.get_x_sentiment(symbol)
-            news_sentiment = bot.sentiment.get_news_sentiment(symbol)
-
-            features = np.array([[
-                indicators["rsi"],
-                indicators["macd"],
-                x_sentiment,
-                news_sentiment
-            ]])
-            X_scaled = self.scaler.transform(features)
-            prediction = self.models[symbol].predict_proba(X_scaled)[0]
-            signal = "buy" if prediction[1] > prediction[0] else "sell"
-            confidence = max(prediction)
+            rf_pred = self.rf_model.predict_proba(features[-1].reshape(1, -1))
+            xgb_pred = self.xgb_model.predict_proba(features[-1].reshape(1, -1))
+            confidence = (rf_pred[0][1] + xgb_pred[0][1]) / 2
+            signal = "buy" if confidence > 0.6 else "sell" if confidence < 0.4 else None
             return signal, confidence
         except Exception as e:
             logger.error(f"Error predicting signal for {symbol}: {e}")
             return None, 0.0
-
-    def explain_signal(self, symbol: str, features: dict):
-        logger.info(f"Signal explanation placeholder for {symbol}")
-        return {"features": features, "explanation": "TBD"}

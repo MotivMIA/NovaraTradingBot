@@ -1,9 +1,10 @@
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 import pandas as pd
 import psycopg2
 import logging
-from performance_analytics import PerformanceAnalytics
+from features.performance_analytics import PerformanceAnalytics
 from config import Config
 
 logging.basicConfig(level=logging.INFO)
@@ -27,23 +28,24 @@ class Dashboard:
 
             st.markdown("### Recent Trades")
             conn = psycopg2.connect(self.config.DB_PATH)
-            df = pd.read_sql("SELECT * FROM trades ORDER BY timestamp DESC LIMIT 10", conn)
-            conn.close()
-            st.dataframe(df)
+            df_trades = pd.read_sql("SELECT * FROM trades ORDER BY timestamp DESC LIMIT 10", conn)
+            st.dataframe(df_trades)
 
-            st.markdown("### Signal Metrics")
-            signals = pd.DataFrame([
-                {"Bot": "TrendBot", "Patterns": "Ichimoku, EMA", "Confidence": "0.7-0.9"},
-                {"Bot": "VolumeBot", "Patterns": "ATR, ADX", "Confidence": "0.6-0.8"},
-                {"Bot": "PredictBot", "Patterns": "ML, X/News Sentiment", "Confidence": "0.6-0.9"},
-                {"Bot": "ArbitrageBot", "Patterns": "Cross-Exchange", "Confidence": "0.5-0.9"},
-                {"Bot": "PatternBot", "Patterns": "Doji, Engulfing", "Confidence": "0.6-0.8"},
-                {"Bot": "NewsBot", "Patterns": "News Sentiment", "Confidence": "0.5-0.9"}
+            st.markdown("### Candlestick Patterns")
+            df_patterns = pd.DataFrame([
+                {"Symbol": s, "Pattern": "Doji, Hammer", "Confidence": "0.6-0.8"}
+                for s in self.config.SYMBOLS
             ])
-            st.dataframe(signals)
+            st.dataframe(df_patterns)
+
+            st.markdown("### VWAP Analysis")
+            fig_vwap = go.Figure()
+            for symbol in self.config.SYMBOLS[:2]:  # Limit for clarity
+                df_candles = pd.read_sql(f"SELECT * FROM candles WHERE symbol = '{symbol}' ORDER BY timestamp DESC LIMIT 100", conn)
+                fig_vwap.add_trace(go.Scatter(x=df_candles["timestamp"], y=df_candles["close"], name=f"{symbol} Close"))
+                fig_vwap.add_trace(go.Scatter(x=df_candles["timestamp"], y=df_candles["close"].rolling(self.config.VWAP_PERIOD).mean(), name=f"{symbol} VWAP"))
+            st.plotly_chart(fig_vwap)
+
+            conn.close()
         else:
             st.write("No performance data available.")
-
-if __name__ == "__main__":
-    dashboard = Dashboard()
-    dashboard.run()
