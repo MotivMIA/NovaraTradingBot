@@ -13,7 +13,7 @@ class CandlestickPatterns:
     def detect_patterns(self, symbol: str, candles: List[Dict]) -> Optional[Dict]:
         try:
             df = pd.DataFrame(candles)
-            if len(df) < 2:
+            if len(df) < 3:  # Need at least 3 candles for morning star
                 return None
 
             patterns = []
@@ -59,6 +59,16 @@ class CandlestickPatterns:
                 (last_candle["high"] - last_candle["open"]) / range_candle > 0.6):
                 patterns.append("shooting_star")
                 confidence += 0.45
+
+            # Morning Star: Three-candle bullish reversal after downtrend
+            if (len(df) >= 3 and
+                df.iloc[-3]["close"] < df.iloc[-3]["open"] and  # Bearish first candle
+                df.iloc[-2]["close"] < df.iloc[-2]["open"] and  # Small body (doji-like)
+                abs(df.iloc[-2]["close"] - df.iloc[-2]["open"]) / (df.iloc[-2]["high"] - df.iloc[-2]["low"]) < 0.2 and
+                last_candle["close"] > last_candle["open"] and  # Bullish third candle
+                last_candle["close"] > df.iloc[-3]["open"] / 2 + df.iloc[-3]["close"] / 2):  # Closes above midpoint
+                patterns.append("morning_star")
+                confidence += 0.5
 
             if patterns:
                 logger.info(f"Candlestick patterns for {symbol}: {patterns}")
