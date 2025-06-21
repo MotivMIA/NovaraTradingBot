@@ -1,99 +1,51 @@
-import os
-import psycopg2
-from logging import getLogger
-from features.config import DB_PATH  # Now a PostgreSQL connection string
+import asyncpg
+import logging
+import pandas as pd
+import asyncio
+from typing import List, Dict
 
-logger = getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class Database:
-    def get_connection(self):
-        return psycopg2.connect(DB_PATH)
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.pool = None
 
-    def initialize_db(self):
+    async def initialize(self):
         try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS candles (
-                            symbol TEXT,
-                            timestamp BIGINT,
-                            open DOUBLE PRECISION,
-                            high DOUBLE PRECISION,
-                            low DOUBLE PRECISION,
-                            close DOUBLE PRECISION,
-                            volume DOUBLE PRECISION,
-                            PRIMARY KEY (symbol, timestamp)
+            self.pool = await asyncpg.create_pool(self.db_path)
+            async with self.pool.acquire() as conn:
+                for symbol in ["BTC-USDT", "ETH-USDT", "XRP-USDT"]:
+                    table_name = symbol.replace("-", "_") + "_candles"
+                    await conn.execute(f"""
+                        CREATE TABLE IF NOT EXISTS {table_name} (
+                            timestamp INTEGER PRIMARY KEY,
+                            open REAL,
+                            high REAL,
+                            low REAL,
+                            close REAL,
+                            volume REAL
                         )
                     """)
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS trades (
-                            symbol TEXT,
-                            entry_time BIGINT,
-                            exit_time BIGINT,
-                            entry_price DOUBLE PRECISION,
-                            exit_price DOUBLE PRECISION,
-                            size DOUBLE PRECISION,
-                            leverage DOUBLE PRECISION,
-                            profit_loss DOUBLE PRECISION,
-                            features_used TEXT,
-                            timeframes TEXT,
-                            side TEXT
-                        )
-                    """)
-                    for symbol in ["BTC-USDT", "ETH-USDT", "XRP-USDT"]:
-                        table_name = symbol.replace("-", "_") + "_candles"
-                        cursor.execute(f"""
-                            CREATE TABLE IF NOT EXISTS {table_name} (
-                                timestamp BIGINT PRIMARY KEY,
-                                open DOUBLE PRECISION,
-                                high DOUBLE PRECISION,
-                                low DOUBLE PRECISION,
-                                close DOUBLE PRECISION,
-                                volume DOUBLE PRECISION
-                            )
-                        """)
-                conn.commit()
-                logger.debug(f"PostgreSQL database initialized")
-        except psycopg2.Error as e:
-            logger.error(f"Failed to initialize database: {e}")
+            logger.info("Database initialized")
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
 
-    def save_candles(self, symbol: str, candles: list):
+    async def store_candles(self, symbol: str, candles: List[Dict]):
         try:
             table_name = symbol.replace("-", "_") + "_candles"
-            with self.get_connection() as conn:
-                with conn.cursor() as cursor:
-                    for candle in candles:
-                        cursor.execute(f"""
-                            INSERT INTO {table_name} (timestamp, open, high, low, close, volume)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (timestamp) DO UPDATE
-                            SET open = EXCLUDED.open,
-                                high = EXCLUDED.high,
-                                low = EXCLUDED.low,
-                                close = EXCLUDED.close,
-                                volume = EXCLUDED.volume
-                        """, (candle["timestamp"], candle["open"], candle["high"], candle["low"], candle["close"], candle["volume"]))
-                conn.commit()
-                logger.debug(f"Saved {len(candles)} candles for {symbol}")
-        except psycopg2.Error as e:
-            logger.error(f"Failed to save candles for {symbol}: {e}")
+            async with self.pool.acquire() as conn:
+                for candle in candles:
+                    await conn.execute(f"""
+                        INSERT INTO {table_name} (timestamp, open, high, low, close, volume)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        ON CONFLICT (timestamp) DO NOTHING
+                    """, candle["timestamp"], candle["open"], candle["high"], candle["low"], candle["close"], candle["volume"])
+            logger.info(f"Stored {len(candles)} candles for {symbol}")
+        except Exception as e:
+            logger.error(f"Error storing candles for {symbol}: {e}")
 
-    def load_candles(self, symbol: str, candle_history: dict):
-        try:
-            table_name = symbol.replace("-", "_") + "_candles"
-            with self.get_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(f"SELECT * FROM {table_name} ORDER BY timestamp DESC LIMIT 100")
-                    rows = cursor.fetchall()
-                    if rows:
-                        candle_history[symbol] = [{
-                            "timestamp": row[0],
-                            "open": row[1],
-                            "high": row[2],
-                            "low": row[3],
-                            "close": row[4],
-                            "volume": row[5]
-                        } for row in rows]
-                        logger.debug(f"Loaded {len(rows)} candles for {symbol} from database")
-        except psycopg2.Error as e:
-            logger.error(f"Failed to load candles for {symbol}: {e}")
+    async def sync_to_cloud(self):
+        logger.info("Cloud sync placeholder")
+        return True

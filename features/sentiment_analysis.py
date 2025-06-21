@@ -1,35 +1,66 @@
-# NLTK-based X sentiment analysis
+import logging
 import time
-import nltk
+import feedparser
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from logging import getLogger
+from typing import Dict, Tuple
 
-logger = getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class SentimentAnalysis:
     def __init__(self):
-        try:
-            nltk.download('vader_lexicon', quiet=True)
-            self.sid = SentimentIntensityAnalyzer()
-            logger.info("NLTK vader_lexicon initialized")
-        except Exception as e:
-            logger.error(f"Failed to initialize NLTK vader_lexicon: {e}")
-            self.sid = None
+        self.sid = SentimentIntensityAnalyzer()
+        self.sentiment_cache: Dict[str, Tuple[float, float]] = {}
+        self.cache_duration = 300  # 5 minutes
 
-    def get_x_sentiment(self, symbol: str, sentiment_cache: dict) -> float:
-        if not self.sid:
+    def get_x_sentiment(self, symbol: str) -> float:
+        try:
+            cache_key = f"{symbol}_x"
+            if cache_key in self.sentiment_cache:
+                sentiment, timestamp = self.sentiment_cache[cache_key]
+                if time.time() - timestamp < self.cache_duration:
+                    return sentiment
+
+            # Assumes xAI API integration (per https://docs.x.ai/docs/overview)
+            posts = self.fetch_x_posts(symbol.replace("-USDT", ""), limit=100)
+            scores = [self.sid.polarity_scores(post["text"])["compound"] for post in posts]
+            sentiment = sum(scores) / len(scores) if scores else 0.0
+            self.sentiment_cache[cache_key] = (sentiment, time.time())
+            logger.info(f"X sentiment for {symbol}: {sentiment:.2f}")
+            return sentiment
+        except Exception as e:
+            logger.error(f"X sentiment fetch failed for {symbol}: {e}")
             return 0.0
-        current_time = time.time()
-        if current_time - sentiment_cache.get(symbol, {}).get("timestamp", 0) < 300:
-            return sentiment_cache[symbol]["score"]
-        
-        mock_posts = [
-            f"{symbol.replace('-USDT', '')} to the moon! 🚀",
-            f"Bearish on {symbol.replace('-USDT', '')} this week.",
-            f"Buying {symbol.replace('-USDT', '')} at dip!"
-        ]
-        scores = [self.sid.polarity_scores(post)["compound"] for post in mock_posts]
-        sentiment_score = sum(scores) / len(scores) if scores else 0.0
-        sentiment_cache[symbol] = {"score": sentiment_score, "timestamp": current_time}
-        logger.debug(f"X sentiment for {symbol}: {sentiment_score:.2f}")
-        return sentiment_score
+
+    def get_news_sentiment(self, symbol: str) -> float:
+        try:
+            cache_key = f"{symbol}_news"
+            if cache_key in self.sentiment_cache:
+                sentiment, timestamp = self.sentiment_cache[cache_key]
+                if time.time() - timestamp < self.cache_duration:
+                    return sentiment
+
+            feed = feedparser.parse(f"https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml&q={symbol.replace('-USDT', '')}")
+            scores = [self.sid.polarity_scores(entry["title"])["compound"] for entry in feed.entries[:50]]
+            sentiment = sum(scores) / len(scores) if scores else 0.0
+            self.sentiment_cache[cache_key] = (sentiment, time.time())
+            logger.info(f"News sentiment for {symbol}: {sentiment:.2f}")
+            return sentiment
+        except Exception as e:
+            logger.error(f"News sentiment fetch failed for {symbol}: {e}")
+            return 0.0
+
+    def get_onchain_sentiment(self, symbol: str) -> float:
+        logger.info(f"On-chain sentiment placeholder for {symbol}")
+        return 0.0
+
+    def fetch_x_posts(self, query: str, limit: int = 100) -> list:
+        # Mock implementation; replace with xAI API call
+        try:
+            import xai_sdk
+            client = xai_sdk.Client(api_key=os.getenv("XAI_API_KEY"))
+            posts = client.search.posts(query=query, limit=limit)
+            return [{"text": post["content"]} for post in posts]
+        except Exception as e:
+            logger.error(f"X API fetch failed: {e}")
+            return []

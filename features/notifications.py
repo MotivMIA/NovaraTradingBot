@@ -1,19 +1,18 @@
-# Webhook alerts, Logtail integration
 import requests
-from logging import getLogger
+import logging
 
-logger = getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class Notifications:
     def __init__(self, webhook_url: str):
         self.webhook_url = webhook_url
 
-    def send_webhook_alert(self, message: str):
-        if not self.webhook_url:
-            return
+    async def send_alert(self, message: str):
         try:
             payload = {"content": message}
-            requests.post(self.webhook_url, json=payload, timeout=5)
-            logger.debug(f"Sent webhook alert: {message}")
+            response = requests.post(self.webhook_url, json=payload)
+            response.raise_for_status()
+            logger.info(f"Alert sent: {message}")
         except Exception as e:
-            logger.error(f"Failed to send webhook alert: {e}")
+            logger.error(f"Error sending alert: {e}")

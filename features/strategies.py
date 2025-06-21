@@ -1,46 +1,29 @@
-from typing import Optional, Tuple, List, Dict
-from logging import getLogger
-from features.config import RSI_OVERSOLD, RSI_OVERBOUGHT, EMA_FAST, EMA_SLOW
+import logging
+from typing import Tuple, List, Optional
 
-logger = getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class Strategy:
-    def __init__(self, name: str):
-        self.name = name
-    
-    def generate_signal(self, symbol: str, price: float, bot, indicators: Dict) -> Optional[Tuple[str, float, str, str]]:
-        pass
-
-class MeanReversionStrategy(Strategy):
-    def generate_signal(self, symbol: str, price: float, bot, indicators: Dict) -> Optional[Tuple[str, float, str, str]]:
+class MeanReversionStrategy:
+    def generate_signal(self, symbol: str, price: float, indicators: dict) -> Tuple[Optional[str], float, List[str]]:
         try:
-            for tf, ind in indicators.items():
-                rsi = ind.get("rsi", 50.0)
-                vwap = ind.get("vwap", price)
-                if rsi < RSI_OVERSOLD and price < vwap:
-                    logger.debug(f"Mean reversion buy signal for {symbol} on {tf}")
-                    return "buy", 0.8, "mean_reversion_oversold", tf
-                elif rsi > RSI_OVERBOUGHT and price > vwap:
-                    logger.debug(f"Mean reversion sell signal for {symbol} on {tf}")
-                    return "sell", 0.8, "mean_reversion_overbought", tf
-            return None
+            if indicators["rsi"] < 30 and price < indicators["bb_lower"]:
+                return "buy", 0.7, ["rsi_oversold", "bb_lower"]
+            elif indicators["rsi"] > 70 and price > indicators["bb_upper"]:
+                return "sell", 0.7, ["rsi_overbought", "bb_upper"]
+            return None, 0.0, []
         except Exception as e:
-            logger.error(f"Mean reversion signal failed for {symbol}: {e}")
-            return None
+            logger.error(f"Error generating mean reversion signal for {symbol}: {e}")
+            return None, 0.0, []
 
-class MomentumStrategy(Strategy):
-    def generate_signal(self, symbol: str, price: float, bot, indicators: Dict) -> Optional[Tuple[str, float, str, str]]:
+class MomentumStrategy:
+    def generate_signal(self, symbol: str, price: float, indicators: dict) -> Tuple[Optional[str], float, List[str]]:
         try:
-            for tf, ind in indicators.items():
-                ema_fast = ind.get("ema_fast", price)
-                ema_slow = ind.get("ema_slow", price)
-                if ema_fast > ema_slow and price > ema_fast:
-                    logger.debug(f"Momentum buy signal for {symbol} on {tf}")
-                    return "buy", 0.75, "momentum_uptrend", tf
-                elif ema_fast < ema_slow and price < ema_fast:
-                    logger.debug(f"Momentum sell signal for {symbol} on {tf}")
-                    return "sell", 0.75, "momentum_downtrend", tf
-            return None
+            if indicators["ema_fast"] > indicators["ema_slow"] and indicators["macd"] > indicators["signal_line"]:
+                return "buy", 0.7, ["ema_crossover", "macd_bullish"]
+            elif indicators["ema_fast"] < indicators["ema_slow"] and indicators["macd"] < indicators["signal_line"]:
+                return "sell", 0.7, ["ema_crossunder", "macd_bearish"]
+            return None, 0.0, []
         except Exception as e:
-            logger.error(f"Momentum signal failed for {symbol}: {e}")
-            return None
+            logger.error(f"Error generating momentum signal for {symbol}: {e}")
+            return None, 0.0, []
